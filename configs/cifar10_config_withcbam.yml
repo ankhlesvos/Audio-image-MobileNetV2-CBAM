@@ -1,0 +1,38 @@
+# 训练相关配置
+#最佳评估准确率: 0.8232
+train_conf:
+  use_gpu: True
+  batch_size: 256  # 根据你的显存调整
+  num_workers: 4    # 根据你的CPU核心数调整
+  max_epoch: 50
+  learning_rate: 0.001
+  weight_decay: 0.00001 # 1e-5
+  save_model_dir: 'saved_models/cifar10_no_attn' # 模型保存路径
+
+# 数据相关配置
+data_conf:
+  dataset_type: 'image'
+
+  # --- 必须有这两行，并且路径要正确 ---
+  train_dir: 'data/cifar10/train'
+  test_dir: 'data/cifar10/test'
+
+  # (可选)
+  image_size: 32
+  train_list: 'data/cifar10/train_list.txt'
+  test_list: 'data/cifar10/test_list.txt'
+
+# 模型相关配置
+model_conf:
+  num_classes: 10 # 你的数据集类别数
+  in_channels: 3
+  width_mult: 1.0
+  # model_config为null时，使用默认的无注意力配置
+  model_config:
+    - [1, 16, 1, 1, 1]
+    - [6, 24, 2, 2, 1]
+    - [6, 32, 3, 1, 1]
+    - [6, 64, 4, 2, 1]
+    - [6, 96, 3, 1, 1]
+    - [6, 160, 3, 1, 1]
+    - [6, 320, 1, 1, 1]
