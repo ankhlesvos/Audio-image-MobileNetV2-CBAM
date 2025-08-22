@@ -1,0 +1,25 @@
+# ================================================================
+# TinyAudioNet - Core Dependencies for Cross-Platform Use
+# ================================================================
+
+# --- Core Deep Learning Framework ---
+# We don't specify the version or CUDA build here.
+# Users are instructed to install PyTorch from the official website
+# according to their specific OS and CUDA version.
+# torch
+# torchvision
+# torchaudio
+
+# --- Data Processing & Scientific Computing ---
+numpy
+PyYAML
+scikit-learn
+matplotlib
+
+# --- Image & Audio Handling ---
+Pillow
+soundfile
+librosa
+
+# --- Utilities ---
+tqdm

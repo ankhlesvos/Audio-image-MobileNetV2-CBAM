@@ -1,0 +1,53 @@
+data_conf:
+  dataset_type: image
+  image_size: 32
+  test_dir: data/cifar10/test
+  train_dir: data/cifar10/train
+model_conf:
+  in_channels: 3
+  model_config:
+  - - 1
+    - 16
+    - 1
+    - 1
+    - 0
+  - - 6
+    - 24
+    - 2
+    - 2
+    - 0
+  - - 6
+    - 32
+    - 3
+    - 1
+    - 0
+  - - 6
+    - 64
+    - 4
+    - 2
+    - 2
+  - - 6
+    - 96
+    - 3
+    - 1
+    - 0
+  - - 6
+    - 160
+    - 3
+    - 1
+    - 0
+  - - 6
+    - 320
+    - 1
+    - 1
+    - 0
+  num_classes: 10
+  width_mult: 1.0
+train_conf:
+  batch_size: 256
+  learning_rate: 0.001
+  max_epoch: 100
+  num_workers: 4
+  save_model_dir: saved_models/cifar10s_preDW_s4
+  use_gpu: true
+  weight_decay: 1.0e-05

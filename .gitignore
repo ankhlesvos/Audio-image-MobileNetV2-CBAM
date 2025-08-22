@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Conda environments
+/envs/
+/conda-bld/
+
+# IDE configs (PyCharm, VSCode)
+.idea/
+.vscode/
+
+# Datasets (非常重要！不要上传数据集本身)
+data/ShipsEar/
+data/cifar10/
+cifar-10-batches-py/
+
+# Saved models (可以上传一个最好的，但不要上传所有)
+# saved_models/*
+# 如果你想上传某个模型，可以取消注释并在下面用!来排除
+!saved_models/mynet_predw_s24/best_model.pth
+
+# Log files
+log/
+
+# OS generated files
+.DS_Store
+Thumbs.db
