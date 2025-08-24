@@ -1,8 +1,10 @@
-# train_image.py
+# train_image.py (Modified Version)
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+# <-- 1. 导入学习率调度器 / ADDED: Import the scheduler
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import yaml
@@ -14,7 +16,7 @@ from modules.model import MyNet
 
 
 def train_image(config_path: str):
-    #1. 加载配置
+    # 1. 加载配置
     print("1.加载图像训练配置")
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
@@ -26,11 +28,11 @@ def train_image(config_path: str):
     print("配置加载成功:")
     print(config)
 
-    #2. 设置设备
+    # 2. 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() and train_conf['use_gpu'] else "cpu")
     print(f"\n2.使用设备: {device}")
 
-    #3. 准备图像数据
+    # 3. 准备图像数据
     print("\n3.准备图像数据 ")
     image_size = data_conf.get('image_size', 224)
     train_dataset = create_image_dataset(data_path=data_conf['train_dir'], is_train=True, image_size=image_size)
@@ -50,11 +52,11 @@ def train_image(config_path: str):
     )
     print(f"训练集大小: {len(train_dataset)}, 测试集大小: {len(test_dataset)}")
 
-    #4. 构建模型
+    # 4. 构建模型
     print("\n4.构建模型")
     model = MyNet(
         num_classes=model_conf['num_classes'],
-        in_channels=model_conf.get('in_channels', 3),#图像3通道
+        in_channels=model_conf.get('in_channels', 3),  # 图像3通道
         model_config=model_conf.get('model_config'),
         width_mult=model_conf.get('width_mult', 1.0)
     )
@@ -62,16 +64,19 @@ def train_image(config_path: str):
     print("模型结构:")
     print(model)
 
-    #5. 定义损失函数和优化器
+    # 5. 定义损失函数和优化器
     print("\n5.定义损失函数和优化器")
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(
+    # <-- 2. 使用 AdamW 优化器 / MODIFIED: Use the AdamW optimizer
+    optimizer = optim.AdamW(
         params=model.parameters(),
         lr=train_conf['learning_rate'],
-        weight_decay=train_conf.get('weight_decay', 1e-5)
+        weight_decay=train_conf.get('weight_decay', 5e-4)  # You can adjust this in your config
     )
+    # <-- 3. 创建学习率调度器 / ADDED: Create the learning rate scheduler
+    scheduler = CosineAnnealingLR(optimizer, T_max=train_conf['max_epoch'])
 
-    #6. 训练与评估循环 (与train.py一致)
+    # 6. 训练与评估循环
     print("\n6.开始训练与评估")
     best_accuracy = 0.0
     save_dir = Path(train_conf['save_model_dir'])
@@ -116,7 +121,10 @@ def train_image(config_path: str):
               f"  Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f}\n"
               f"  Eval Acc: {eval_accuracy:.4f}")
 
-        #保存最佳模型
+        # <-- 4. 在每个 epoch 结束后更新学习率 / ADDED: Update the learning rate at the end of the epoch
+        scheduler.step()
+
+        # 保存最佳模型
         if eval_accuracy > best_accuracy:
             best_accuracy = eval_accuracy
             best_model_path = save_dir / "best_model.pth"
@@ -138,8 +146,7 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser()
-    # 为图像训练创建一个专属的默认配置文件
-    parser.add_argument('-c', '--config', default='configs/cifar10_config.yml',
+    parser.add_argument('-c', '--config', default='configs/cifar10_ablations/cifar10s_preDW_s24_config.yml',
                         help='Path to the image training configuration file')
     args = parser.parse_args()
 
