@@ -1,15 +1,15 @@
-# train_image.py (Modified Version)
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-# <-- 1. 导入学习率调度器 / ADDED: Import the scheduler
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import yaml
 import os
 from pathlib import Path
+from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
+import numpy as np
 
 from image_dataset import create_image_dataset
 from modules.model import MyNet
@@ -56,29 +56,40 @@ def train_image(config_path: str):
     print("\n4.构建模型")
     model = MyNet(
         num_classes=model_conf['num_classes'],
-        in_channels=model_conf.get('in_channels', 3),  # 图像3通道
+        in_channels=model_conf.get('in_channels', 3), 
         model_config=model_conf.get('model_config'),
-        width_mult=model_conf.get('width_mult', 1.0)
+        width_mult=model_conf.get('width_mult', 1.0),
+        asymmetric=model_conf.get('asymmetric', False),
+        force_no_residual=model_conf.get('force_no_residual', False)
     )
     model.to(device)
     print("模型结构:")
-    print(model)
+    # print(model) # Too verbose
+    
+    # Calculate GFLOPs/Params
+    try:
+        flops, params = model.profile_model(input_size=(model_conf.get('in_channels', 3), image_size, image_size))
+        print(f"FLOPs: {flops / 1e9:.4f} G")
+        print(f"Params: {params / 1e6:.4f} M")
+    except Exception as e:
+        print(f"Profiling failed: {e}")
+        flops, params = 0, 0
+
 
     # 5. 定义损失函数和优化器
     print("\n5.定义损失函数和优化器")
     criterion = nn.CrossEntropyLoss()
-    # <-- 2. 使用 AdamW 优化器 / MODIFIED: Use the AdamW optimizer
     optimizer = optim.AdamW(
         params=model.parameters(),
         lr=train_conf['learning_rate'],
-        weight_decay=train_conf.get('weight_decay', 5e-4)  # You can adjust this in your config
+        weight_decay=train_conf.get('weight_decay', 5e-4) 
     )
-    # <-- 3. 创建学习率调度器 / ADDED: Create the learning rate scheduler
     scheduler = CosineAnnealingLR(optimizer, T_max=train_conf['max_epoch'])
 
     # 6. 训练与评估循环
     print("\n6.开始训练与评估")
     best_accuracy = 0.0
+    f1 = 0.0
     save_dir = Path(train_conf['save_model_dir'])
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -108,20 +119,30 @@ def train_image(config_path: str):
 
         model.eval()
         total_correct = 0
+        all_preds = []
+        all_labels = []
         with torch.no_grad():
             for inputs, labels in tqdm(test_loader, desc=f"Epoch {epoch + 1}/{train_conf['max_epoch']} [Eval]"):
                 inputs, labels = inputs.to(device), labels.to(device)
                 outputs = model(inputs)
                 _, predicted = torch.max(outputs.data, 1)
                 total_correct += (predicted == labels).sum().item()
+                
+                # Collect for metrics
+                all_preds.extend(predicted.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
 
         eval_accuracy = total_correct / len(test_dataset)
+        
+        # Calculate P, R, F1
+        precision = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+        recall = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+        f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
 
         print(f"Epoch {epoch + 1}/{train_conf['max_epoch']}: \n"
               f"  Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f}\n"
-              f"  Eval Acc: {eval_accuracy:.4f}")
+              f"  Eval Acc: {eval_accuracy:.4f} | P: {precision:.4f} | R: {recall:.4f} | F1: {f1:.4f}")
 
-        # <-- 4. 在每个 epoch 结束后更新学习率 / ADDED: Update the learning rate at the end of the epoch
         scheduler.step()
 
         # 保存最佳模型
@@ -135,9 +156,10 @@ def train_image(config_path: str):
     print(f"最佳评估准确率: {best_accuracy:.4f}")
     try:
         with open(save_dir / "best_accuracy_log.txt", 'w') as f:
-            log_message = f"最佳评估准确率: {best_accuracy:.4f}\n"
+            log_message = f"Best Acc: {best_accuracy:.4f}\nFinal F1: {f1:.4f}\nParams: {params/1e6:.4f}M\nFLOPs: {flops/1e9:.4f}G\n"
             f.write(log_message)
         print(f"写入 {save_dir / 'best_accuracy_log.txt'}")
+        
     except Exception as e:
         print(f"写入时出错: {e}")
 

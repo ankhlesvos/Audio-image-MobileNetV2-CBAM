@@ -4,6 +4,40 @@ import torch
 import torch.nn as nn
 import sys
 
+try:
+    from thop import profile
+except ImportError:
+    profile = None
+
+class SELayer(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(SELayer, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // reduction, channel, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
+
+class AsymmetricConv(nn.Module):
+    def __init__(self, in_planes, out_planes, kernel_size, stride=1, padding=0, groups=1, bias=False):
+        super(AsymmetricConv, self).__init__()
+        self.conv = nn.Sequential(
+             nn.Conv2d(in_planes, out_planes, kernel_size=(kernel_size, 1), stride=(stride, 1), padding=(padding, 0), groups=groups, bias=bias),
+             nn.BatchNorm2d(out_planes),
+             nn.ReLU6(inplace=True),
+             nn.Conv2d(out_planes, out_planes, kernel_size=(1, kernel_size), stride=(1, stride), padding=(0, padding), groups=groups, bias=bias),
+        )
+    def forward(self, x):
+        return self.conv(x)
+
 class ChannelAttention(nn.Module):
     def __init__(self, in_planes, ratio=16):
         super(ChannelAttention, self).__init__()
@@ -61,21 +95,37 @@ class ConvBNReLU(nn.Sequential):
         )
 
 class InvertedResidual(nn.Module):
-    def __init__(self, inp, oup, stride, expand_ratio, attention_mode=None):
+    def __init__(self, inp, oup, stride, expand_ratio, attention_mode=None, asymmetric=False, use_res_connect=True):
         super(InvertedResidual, self).__init__()
         self.stride = stride
         assert stride in [1, 2]
-        assert attention_mode in ['pre_dw', 'post_dw', None]
+        assert attention_mode in ['pre_dw', 'post_dw', 'se', None]
         hidden_dim = int(round(inp * expand_ratio))
-        self.use_res_connect = self.stride == 1 and inp == oup
+        
+        # Determine residuals: Only if stride=1, inp=oup, AND manually allowed
+        self.use_res_connect = (self.stride == 1 and inp == oup) and use_res_connect
+        
         layers = []
         if expand_ratio != 1:
             layers.append(ConvBNReLU(inp, hidden_dim, kernel_size=1, stride=1, groups=1))
+            
         if attention_mode == 'pre_dw':
             layers.append(CBAM(hidden_dim))
-        layers.extend([ConvBNReLU(hidden_dim, hidden_dim, kernel_size=3, stride=stride, groups=hidden_dim)])
+            
+        # Depthwise Conv (Standard or Asymmetric)
+        if asymmetric:
+             # Using factorized 3x3 conv (3x1 then 1x3)
+             padding = (3 - 1) // 2
+             layers.append(AsymmetricConv(hidden_dim, hidden_dim, kernel_size=3, stride=stride, padding=padding, groups=hidden_dim, bias=False))
+             # AsymmetricConv already has BN/ReLU6 inside
+        else:
+             layers.append(ConvBNReLU(hidden_dim, hidden_dim, kernel_size=3, stride=stride, groups=hidden_dim))
+             
         if attention_mode == 'post_dw':
             layers.append(CBAM(hidden_dim))
+        elif attention_mode == 'se':
+            layers.append(SELayer(hidden_dim))
+            
         layers.extend([nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False), nn.BatchNorm2d(oup)])
         self.conv = nn.Sequential(*layers)
 
@@ -86,8 +136,11 @@ class InvertedResidual(nn.Module):
             return self.conv(x)
 
 class MyNet(nn.Module):
-    def __init__(self, num_classes=1000, model_config=None, width_mult=1.0, in_channels=1):
+    def __init__(self, num_classes=1000, model_config=None, width_mult=1.0, in_channels=1,
+                 asymmetric=False, force_no_residual=False):
         super(MyNet, self).__init__()
+        self.asymmetric = asymmetric
+        self.force_no_residual = force_no_residual
 
         if model_config is None:
             model_config = [
@@ -99,7 +152,12 @@ class MyNet(nn.Module):
                 [6, 160, 3, 2, 0],
                 [6, 320, 1, 1, 0],
             ]
-        attn_map = {0: None, 1: 'post_dw', 2: 'pre_dw'}#调整第四个数字以修改注意力参数
+        
+        # M1 config support: Force no residuals if specified
+        # Standard MobileNetV2 usually has residuals where possible
+        self.use_res_connect = True 
+        
+        attn_map = {0: None, 1: 'post_dw', 2: 'pre_dw', 3: 'se'} # 3 for SE
         block = InvertedResidual
         stem_output_channel = 32
         last_channel = 1280
@@ -113,8 +171,14 @@ class MyNet(nn.Module):
             attention_mode = attn_map.get(attn_code)
             for i in range(n):
                 stride = s if i == 0 else 1
+                
+                # Check for global flags
+                asymmetric_flag = getattr(self, 'asymmetric', False)
+                use_res_connect = not getattr(self, 'force_no_residual', False)
+
                 features.append(block(current_channels, output_channel, stride, expand_ratio=t,
-                                      attention_mode=attention_mode))
+                                      attention_mode=attention_mode, asymmetric=asymmetric_flag,
+                                      use_res_connect=use_res_connect))
                 current_channels = output_channel
         features.append(ConvBNReLU(current_channels, self.last_channel, kernel_size=1, stride=1, groups=1))
         self.features = nn.Sequential(*features)
@@ -131,6 +195,14 @@ class MyNet(nn.Module):
         x = self.classifier(x)
         return x
 
+    def profile_model(self, input_size=(1, 80, 301)):
+        if profile is None:
+            return 0, 0
+        device = next(self.parameters()).device
+        inputs = torch.randn(1, *input_size).to(device)
+        flops, params = profile(self, inputs=(inputs,), verbose=False)
+        return flops, params
+
 
 # 测试
 if __name__ == '__main__':
@@ -145,4 +217,10 @@ if __name__ == '__main__':
     output_cbam = model_cbam(test_input)
     print(f"模型输出形状: {output_cbam.shape}")
     assert output_cbam.shape == (2, 11), "错误"
+    
+    # Test M5 Asymmetric
+    model_m5 = MyNet(num_classes=11, in_channels=1, model_config=cbam_config, asymmetric=True)
+    output_m5 = model_m5(test_input)
+    print(f"M5 输出形状: {output_m5.shape}")
+
     print("通过")

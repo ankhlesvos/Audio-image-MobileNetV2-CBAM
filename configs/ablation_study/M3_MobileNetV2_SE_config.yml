@@ -1,53 +1,53 @@
 data_conf:
-  dataset_type: image
-  image_size: 32
-  test_dir: data/cifar10/test
-  train_dir: data/cifar10/train
+  test_list: data/test_list.txt
+  train_list: data/train_list.txt
 model_conf:
-  in_channels: 3
+  asymmetric: false
+  force_no_residual: false
+  in_channels: 1
   model_config:
   - - 1
     - 16
     - 1
     - 1
-    - 0
+    - 3
   - - 6
     - 24
     - 2
     - 2
-    - 0
+    - 3
   - - 6
     - 32
     - 3
     - 1
-    - 0
+    - 3
   - - 6
     - 64
     - 4
     - 2
-    - 1
+    - 3
   - - 6
     - 96
     - 3
     - 1
-    - 0
+    - 3
   - - 6
     - 160
     - 3
     - 1
-    - 0
+    - 3
   - - 6
     - 320
     - 1
     - 1
-    - 0
-  num_classes: 10
+    - 3
+  num_classes: 4
   width_mult: 1.0
 train_conf:
-  batch_size: 256
+  batch_size: 16
   learning_rate: 0.001
-  max_epoch: 100
+  max_epoch: 50
   num_workers: 4
-  save_model_dir: saved_models/cifar10s_postDW_s4
+  save_model_dir: saved_models/M3_MobileNetV2_SE
   use_gpu: true
-  weight_decay: 1.0e-05
+  weight_decay: 0.0001

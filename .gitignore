@@ -11,6 +11,8 @@ __pycache__/
 # IDE configs (PyCharm, VSCode)
 .idea/
 .vscode/
+/venv/
+/DeepShip-main/
 
 # Datasets (非常重要！不要上传数据集本身)
 data/ShipsEar/
@@ -28,3 +30,4 @@ log/
 # OS generated files
 .DS_Store
 Thumbs.db
+/data/

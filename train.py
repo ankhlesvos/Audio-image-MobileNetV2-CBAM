@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from sklearn.metrics import precision_score, recall_score, f1_score, classification_report
+import numpy as np
 from tqdm import tqdm
 import yaml
 import os
@@ -36,8 +38,8 @@ def train(config_path: str):
 
     # --- 3. 准备数据 ---
     print("\n--- 3. 准备数据 ---")
-    train_dataset = AudioDataset(data_list_path=data_conf['train_list'])
-    test_dataset = AudioDataset(data_list_path=data_conf['test_list'])
+    train_dataset = AudioDataset(data_list_path=data_conf['train_list'], train=True)
+    test_dataset = AudioDataset(data_list_path=data_conf['test_list'], train=False)
 
     train_loader = DataLoader(
         dataset=train_dataset,
@@ -52,36 +54,100 @@ def train(config_path: str):
         num_workers=train_conf['num_workers']
     )
     print(f"训练集大小: {len(train_dataset)}, 测试集大小: {len(test_dataset)}")
+    
+    # --- Calculate Class Weights (ENS) ---
+    print("Calculating class weights (Effective Number of Samples)...")
+    class_counts = {}
+    for line in train_dataset.lines:
+        try:
+            _, label = line.split('\t')
+            label = int(label)
+            class_counts[label] = class_counts.get(label, 0) + 1
+        except:
+            pass
+    
+    # Sort by key to ensure order [0, 1, 2, 3]
+    counts = [class_counts.get(i, 0) for i in range(4)]
+    print(f"Class Counts: {counts}")
+    
+    beta = 0.9999
+    effective_num = 1.0 - np.power(beta, counts)
+    # Handle zero counts: precise arithmetic. If count is 0, effective_num is 0.
+    # To avoid division by zero (or by eps), we mask them.
+    weights = np.zeros_like(effective_num)
+    
+    # Calculate weights only for classes with samples
+    valid_classes = effective_num > 1e-6 # float precision
+    weights[valid_classes] = (1.0 - beta) / np.array(effective_num)[valid_classes]
+    
+    # Normalize (sum to 4? or sum to num_valid_classes? usually sum to num_classes)
+    if np.sum(weights) > 0:
+        weights = weights / np.sum(weights) * 4 # Normalize so mean weight is 1.0
+    else:
+        # Fallback if no data (should not happen in real training except debug)
+        weights = np.ones(4)
+
+    
+    class_weights = torch.tensor(weights).float().to(device)
+    print(f"Class Weights: {class_weights}")
+
 
     # --- 4. 构建模型 ---
     print("\n--- 4. 构建模型 ---")
+    width_mult = model_conf.get('width_mult', 1.0)
+    print(f"Model Width Mult: {width_mult}")
     model = MyNet(
         num_classes=model_conf['num_classes'],
         model_config=model_conf.get('model_config'),
-        width_mult=model_conf.get('width_mult', 1.0),
-        in_channels=model_conf.get('in_channels', 1)
+        width_mult=width_mult,
+        in_channels=model_conf.get('in_channels', 1),
+        asymmetric=model_conf.get('asymmetric', False),
+        force_no_residual=model_conf.get('force_no_residual', False)
     )
     model.to(device)
     print("模型结构:")
     # 简单的模型结构打印
     print(model)
 
+    # Calculate GFLOPs/Params
+    try:
+        # DeepShip input: (1, 80, 301) for 3 seconds approx? 
+        # MelSpec shape: n_mels=80. time steps depends on audio length and hop length.
+        # dataset.py uses 3s segments. sample_rate=xxx.
+        # Let's assume standard shape used in verifying: (1, 80, 301)
+        flops, params = model.profile_model(input_size=(1, 80, 301))
+        print(f"FLOPs: {flops / 1e9:.4f} G")
+        print(f"Params: {params / 1e6:.4f} M")
+    except Exception as e:
+        print(f"Profiling failed: {e}")
+        flops, params = 0, 0
+    
     # --- 5. 定义损失函数和优化器 ---
     print("\n--- 5. 定义损失函数和优化器 ---")
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(
+    # Label Smoothing added as per user suggestion
+    criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
+
+
+    optimizer = optim.AdamW(
         params=model.parameters(),
         lr=train_conf['learning_rate'],
-        weight_decay=train_conf.get('weight_decay', 1e-5)
+        weight_decay=train_conf.get('weight_decay', 1e-4)
     )
-    # 学习率调度器
-    # scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+    # Cosine Annealing Scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=train_conf['max_epoch'],
+        eta_min=0
+    )
 
     # --- 6. 训练与评估循环 ---
     print("\n--- 6. 开始训练与评估 ---")
     best_accuracy = 0.0
     save_dir = Path(train_conf['save_model_dir'])
     save_dir.mkdir(parents=True, exist_ok=True)  # 确保保存目录存在
+    
+    # Initialize f1 for saving results later
+    f1 = 0.0
 
     for epoch in range(train_conf['max_epoch']):
         # --- 训练阶段 ---
@@ -91,21 +157,65 @@ def train(config_path: str):
 
         # 使用tqdm创建进度条
         train_pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{train_conf['max_epoch']} [Train]")
-        for inputs, labels in train_pbar:
-            inputs, labels = inputs.to(device), labels.to(device)
-
+        for inputs, label_a, label_b, lam in train_pbar:
+            inputs = inputs.to(device)
+            label_a = label_a.to(device)
+            label_b = label_b.to(device)
+            # lam is a tensor batch or scalar? 
+            # From dataset: lam is float. DataLoader collates floats into a tensor (batch_size,).
+            # But wait, dataset returns 'lam' as float. DataLoader will stack them into a double tensor?
+            # Actually dataset returns `lam` (float). DataLoader -> Tensor of shape (B,).
+            
+            # However, if lam is constant 1.0 for some, and random for others...
+            # We need to handle 'lam' carefully.
+            # Convert to device.
+            lam = lam.to(device).float()
+            # If lam is a 1D tensor [B], we need to reshape for broadcasting if necessary, 
+            # but for scalar multiplication with loss it's fine if loss is reduction='mean'.
+            # Wait, nn.CrossEntropyLoss gives scalar by default.
+            # We need element-wise loss to apply different lambda per sample?
+            # Or is lambda user-mixed? dataset says: `lam` is per sample.
+            # So we need `reduction='none'` in criterion? No, standard Mixup usually:
+            # loss = lam * loss_a + (1-lam) * loss_b
+            # If lam varies per sample, this implies:
+            # loss = mean( lam_i * loss_i(a) + (1-lam_i) * loss_i(b) )
+            
+            # Let's verify `lam`.
+            # If `lam` is (B,), checking shape logic.
+            # We need item-wise loss.
+            
+            # OPTION 1: Redefine criterion to reduction='none', calculate manually, then mean.
+            # OPTION 2: Use constant lambda per batch? My dataset implementation does Per-Sample Mixup.
+            # So I MUST use reduction='none'.
+            
             optimizer.zero_grad()
             outputs = model(inputs)
-            loss = criterion(outputs, labels)
+            
+            # Calculate loss per sample
+            # We need to temporarily set reduction='none' or use functional interface
+            loss_a = torch.nn.functional.cross_entropy(outputs, label_a, weight=class_weights, reduction='none')
+            loss_b = torch.nn.functional.cross_entropy(outputs, label_b, weight=class_weights, reduction='none')
+            
+            loss = loss_a * lam + loss_b * (1 - lam)
+            loss = loss.mean()
+            
             loss.backward()
             optimizer.step()
 
             total_loss += loss.item()
             _, predicted = torch.max(outputs.data, 1)
-            total_correct += (predicted == labels).sum().item()
+            
+            # Accuracy metric: Use label_a (dominant) or mixed? 
+            # Usually for accuracy we compare to the "heavier" label, or just label_a since lam ~ Beta(1,1) is symmetric but usually > 0.5 rules?
+            # In my code: lam = beta(1,1).
+            # For tracking, let's use label_a if lam > 0.5 else label_b?
+            # Or just use label_a as it's the "original" signal.
+            # Simple approach: compare to label_a.
+            total_correct += (predicted == label_a).sum().item()
 
             # 更新进度条描述
             train_pbar.set_postfix(loss=loss.item())
+
 
         avg_train_loss = total_loss / len(train_loader)
         train_accuracy = total_correct / len(train_dataset)
@@ -113,18 +223,34 @@ def train(config_path: str):
         # --- 评估阶段 ---
         model.eval()
         total_correct = 0
+        all_preds = []
+        all_labels = []
         with torch.no_grad():
-            for inputs, labels in tqdm(test_loader, desc=f"Epoch {epoch + 1}/{train_conf['max_epoch']} [Eval]"):
-                inputs, labels = inputs.to(device), labels.to(device)
-                outputs = model(inputs)
+            for mel_spectrogram, label_a, label_b, lam in tqdm(test_loader, desc=f"Epoch {epoch + 1}/{train_conf['max_epoch']} [Eval]"):
+                # For eval, label_a == label_b. lam == 1.0. 
+                mel_spectrogram, labels = mel_spectrogram.to(device), label_a.to(device)
+                outputs = model(mel_spectrogram)
                 _, predicted = torch.max(outputs.data, 1)
+
                 total_correct += (predicted == labels).sum().item()
+                
+                all_preds.extend(predicted.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
 
         eval_accuracy = total_correct / len(test_dataset)
+        
+        # Calculate P, R, F1
+        precision = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+        recall = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+        f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
 
         print(f"Epoch {epoch + 1}/{train_conf['max_epoch']}: \n"
               f"  Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f}\n"
-              f"  Eval Acc: {eval_accuracy:.4f}")
+              f"  Eval Acc: {eval_accuracy:.4f} | P: {precision:.4f} | R: {recall:.4f} | F1: {f1:.4f}")
+              
+        if (epoch + 1) % 5 == 0 or epoch == train_conf['max_epoch'] - 1:
+            print("\nClassification Report:\n")
+            print(classification_report(all_labels, all_preds, zero_division=0))
 
         # --- 保存最佳模型 ---
         if eval_accuracy > best_accuracy:
@@ -134,10 +260,20 @@ def train(config_path: str):
             print(f"  New best model saved to {best_model_path} with accuracy: {best_accuracy:.4f}")
 
         # 更新学习率
-        # scheduler.step()
+        # Update learning rate
+        scheduler.step()
 
     print("\n--- 训练完成 ---")
     print(f"最佳评估准确率: {best_accuracy:.4f}")
+    if train_conf['save_model_dir']:
+        save_dir = Path(train_conf['save_model_dir'])
+        with open(save_dir / "results.txt", 'w') as f:
+             f.write(f"Best Acc: {best_accuracy:.4f}\n")
+             f.write(f"F1: {f1:.4f}\n")
+             f.write(f"Params: {params}\n")
+             f.write(f"FLOPs: {flops}\n")
+    
+    return best_accuracy
 
 
 if __name__ == '__main__':

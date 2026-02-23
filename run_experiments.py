@@ -1,115 +1,160 @@
-# run_experiments.py
-
 import yaml
 import os
 import subprocess
 from pathlib import Path
 
-#基础的配置文件模板
+# Base Configuration Template for DeepShip
 BASE_CONFIG_TEMPLATE = {
     'train_conf': {
         'use_gpu': True,
-        'batch_size': 256,
+        'batch_size': 16, # Reduced to 16 to avoid OOM. Adjust if needed.
         'num_workers': 4,
-        'max_epoch': 100,
+        'max_epoch': 50,
         'learning_rate': 0.001,
-        'weight_decay': 1e-5,
+        'weight_decay': 1e-4,
         'save_model_dir': None
     },
     'data_conf': {
-        'dataset_type': 'image',
-        'train_dir': 'data/cifar10/train',
-        'test_dir': 'data/cifar10/test',
-        'image_size': 32
+        'train_list': 'data/train_list.txt',
+        'test_list': 'data/test_list.txt'
     },
     'model_conf': {
-        'num_classes': 10,
-        'in_channels': 3,
+        'num_classes': 4,
+        'in_channels': 1,
         'width_mult': 1.0,
-        'model_config': None  # 将在这里动态填
+        'model_config': None,
+        # Ablation flags
+        'asymmetric': False,
+        'force_no_residual': False
     }
 }
 
-#定义所有想要测试的实验配置
+# Define Experiments M1-M5
+# Standard MobileNetV2 structure [t, c, n, s, attn]
+# attn codes: 0: None, 1: Post-DW CBAM, 2: Pre-DW CBAM, 3: SE
+
+CONFIG_BASE = [
+    [1, 16, 1, 1, 0],
+    [6, 24, 2, 2, 0],
+    [6, 32, 3, 1, 0],
+    [6, 64, 4, 2, 0],
+    [6, 96, 3, 1, 0],
+    [6, 160, 3, 1, 0],
+    [6, 320, 1, 1, 0]
+]
+
+# Config with Pre-DW CBAM at s24 (Stage 2 and Stage 4)
+# M4/M5 uses this.
+CONFIG_CBAM_S24 = [
+    [1, 16, 1, 1, 0],
+    [6, 24, 2, 2, 2], # s24 (Stage 2)
+    [6, 32, 3, 1, 0],
+    [6, 64, 4, 2, 2], # s24 (Stage 4)
+    [6, 96, 3, 1, 0],
+    [6, 160, 3, 1, 0],
+    [6, 320, 1, 1, 0]
+]
+
+# Config with SE everywhere (M3)
+CONFIG_SE_ALL = [
+    [1, 16, 1, 1, 3],
+    [6, 24, 2, 2, 3],
+    [6, 32, 3, 1, 3],
+    [6, 64, 4, 2, 3],
+    [6, 96, 3, 1, 3],
+    [6, 160, 3, 1, 3],
+    [6, 320, 1, 1, 3]
+]
+
 EXPERIMENTS = {
-    "cifar10s_postDW_s4": [
-        [1, 16, 1, 1, 0], [6, 24, 2, 2, 0], [6, 32, 3, 1, 0],
-        [6, 64, 4, 2, 1], [6, 96, 3, 1, 0], [6, 160, 3, 1, 0], [6, 320, 1, 1, 0]
-    ],
-    "cifar10s_postDW_s24": [
-        [1, 16, 1, 1, 0], [6, 24, 2, 2, 1], [6, 32, 3, 1, 0],
-        [6, 64, 4, 2, 1], [6, 96, 3, 1, 0], [6, 160, 3, 1, 0], [6, 320, 1, 1, 0]
-    ],
-    "cifar10s_postDW_s45": [
-        [1, 16, 1, 1, 0], [6, 24, 2, 2, 0], [6, 32, 3, 1, 0],
-        [6, 64, 4, 2, 1], [6, 96, 3, 1, 1], [6, 160, 3, 1, 0], [6, 320, 1, 1, 0]
-    ],
-    "cifar10s_postDW_s345": [
-        [1, 16, 1, 1, 0], [6, 24, 2, 2, 0], [6, 32, 3, 1, 1],
-        [6, 64, 4, 2, 1], [6, 96, 3, 1, 1], [6, 160, 3, 1, 0], [6, 320, 1, 1, 0]
-    ],
-    "cifar10s_postDW_s2345": [
-        [1, 16, 1, 1, 0], [6, 24, 2, 2, 1], [6, 32, 3, 1, 1],
-        [6, 64, 4, 2, 1], [6, 96, 3, 1, 1], [6, 160, 3, 1, 0], [6, 320, 1, 1, 0]
-    ],
-    "cifar10s_preDW_s4": [
-        [1, 16, 1, 1, 0], [6, 24, 2, 2, 0], [6, 32, 3, 1, 0],
-        [6, 64, 4, 2, 2], [6, 96, 3, 1, 0], [6, 160, 3, 1, 0], [6, 320, 1, 1, 0]
-    ],
-    "cifar10s_preDW_s24": [
-        [1, 16, 1, 1, 0], [6, 24, 2, 2, 2], [6, 32, 3, 1, 0],
-        [6, 64, 4, 2, 2], [6, 96, 3, 1, 0], [6, 160, 3, 1, 0], [6, 320, 1, 1, 0]
-    ],
-    "cifar10s_preDW_s45": [
-        [1, 16, 1, 1, 0], [6, 24, 2, 2, 0], [6, 32, 3, 1, 0],
-        [6, 64, 4, 2, 2], [6, 96, 3, 1, 2], [6, 160, 3, 1, 0], [6, 320, 1, 1, 0]
-    ],
-    "cifar10s_preDW_s345": [
-        [1, 16, 1, 1, 0], [6, 24, 2, 2, 0], [6, 32, 3, 1, 2],
-        [6, 64, 4, 2, 2], [6, 96, 3, 1, 2], [6, 160, 3, 1, 0], [6, 320, 1, 1, 0]
-    ],
-    "cifar10s_preDW_s2345": [
-        [1, 16, 1, 1, 0], [6, 24, 2, 2, 2], [6, 32, 3, 1, 2],
-        [6, 64, 4, 2, 2], [6, 96, 3, 1, 2], [6, 160, 3, 1, 0], [6, 320, 1, 1, 0]
-    ],
+    "M1_BasicCNN": {
+        "model_config": CONFIG_BASE,
+        "force_no_residual": True,
+        "asymmetric": False
+    },
+    "M2_MobileNetV2": {
+        "model_config": CONFIG_BASE,
+        "force_no_residual": False,
+        "asymmetric": False
+    },
+    "M3_MobileNetV2_SE": {
+        "model_config": CONFIG_SE_ALL,
+        "force_no_residual": False,
+        "asymmetric": False
+    },
+    "M4_MobileNetV2_CBAM": {
+        "model_config": CONFIG_CBAM_S24,
+        "force_no_residual": False,
+        "asymmetric": False
+    },
+    "M5_MobileNetV2_CBAM_Asym": {
+        "model_config": CONFIG_CBAM_S24,
+        "force_no_residual": False,
+        "asymmetric": True
+    },
 }
 
-
 def main():
-    # 保存的目录
-    configs_dir = Path("configs/cifar10_ablations")
+    configs_dir = Path("configs/ablation_study")
     configs_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create results file
+    with open("ablation_results_summary.txt", "w") as f:
+        f.write("Experiment | Best Acc | F1 | Params | FLOPs\n")
+        f.write("-" * 60 + "\n")
 
-    #3. 循环生成配置文件并执行训练
-    for exp_name, model_config in EXPERIMENTS.items():
-        print(f"\n{'=' * 20} 开始实验: {exp_name} {'=' * 20}")
+    for exp_name, setup in EXPERIMENTS.items():
+        print(f"\n{'=' * 20} Starting Experiment: {exp_name} {'=' * 20}")
 
         current_config = BASE_CONFIG_TEMPLATE.copy()
-        current_config['model_conf']['model_config'] = model_config
+        current_config['model_conf'] = BASE_CONFIG_TEMPLATE['model_conf'].copy()
+        current_config['train_conf'] = BASE_CONFIG_TEMPLATE['train_conf'].copy()
+        current_config['data_conf'] = BASE_CONFIG_TEMPLATE['data_conf'].copy()
+        
+        # Apply specific settings
+        current_config['model_conf']['model_config'] = setup['model_config']
+        current_config['model_conf']['asymmetric'] = setup['asymmetric']
+        current_config['model_conf']['force_no_residual'] = setup['force_no_residual']
         current_config['train_conf']['save_model_dir'] = f'saved_models/{exp_name}'
 
         config_path = configs_dir / f"{exp_name}_config.yml"
         with open(config_path, 'w') as f:
             yaml.dump(current_config, f, default_flow_style=False)
-        print(f"配置文件已生成: {config_path}")
+        print(f"Config generated: {config_path}")
 
         command = [
             "python",
-            "train_image.py",
+            "train.py",
             "-c",
             str(config_path)
         ]
 
-        print(f"执行命令: {' '.join(command)}")
+        print(f"Executing: {' '.join(command)}")
 
         try:
+            # Run training
             subprocess.run(command, check=True)
-            print(f"实验 {exp_name} 完成")
-        except subprocess.CalledProcessError as e:
-            print(f"实验 {exp_name} 失败")
-            print(f"错误信息: {e}")
-            break
+            print(f"Experiment {exp_name} finished.")
+            
+            # Read results
+            results_file = Path(f'saved_models/{exp_name}/results.txt')
+            if results_file.exists():
+                with open(results_file, 'r') as rf:
+                    content = rf.read()
+                    print(f"Results for {exp_name}:\n{content}")
+                    # Parse for summary
+                    lines = content.strip().split('\n')
+                    acc = lines[0].split(': ')[1]
+                    f1 = lines[1].split(': ')[1] if len(lines) > 1 else "N/A"
+                    params = lines[2].split(': ')[1] if len(lines) > 2 else "N/A"
+                    flops = lines[3].split(': ')[1] if len(lines) > 3 else "N/A"
+                    
+                    with open("ablation_results_summary.txt", "a") as sf:
+                        sf.write(f"{exp_name} | {acc} | {f1} | {params} | {flops}\n")
 
+        except subprocess.CalledProcessError as e:
+            print(f"Experiment {exp_name} failed: {e}")
+            # break # Optionally continue
 
 if __name__ == '__main__':
     main()

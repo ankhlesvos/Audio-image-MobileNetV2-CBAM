@@ -1,18 +1,21 @@
-# preprocess.py
 
 import torch
 import torchaudio
+import soundfile as sf
 import torchaudio.transforms as T
+import numpy as np
 
 # 配置
 AUDIO_CONFIG = {
     "sample_rate": 16000,
-    "n_fft": 512,  # FFT窗口大小
-    "win_length": 400,  # 窗口长度 (25ms for 16k SR)
-    "hop_length": 160,  # 帧移 (10ms for 16k SR)
-    "n_mels": 80,  # 梅尔滤波器数量
+    "n_fft": 2048,  # Increased for better frequency resolution (approx 7.8Hz per bin)
+    "win_length": 2048,  # Match n_fft
+    "hop_length": 512,  # ~32ms stride
+    "n_mels": 160,  # Increased vertical resolution (User Request: 160 to compensate for bandwidth)
+    "f_min": 0,     # Capture low frequencies
+    "f_max": 8000,  # Expanded to 8000Hz (Nyquist) to capture high-freq textures
     "target_db": -20.0,  # 音量归一化分贝值
-    "target_length_secs": 3,  # 目标音频长度（秒）
+    "target_length_secs": 5,  # Increased to 5s to capture more rhythm/periodicity
 }
 
 AUDIO_CONFIG["target_length_frames"] = int(AUDIO_CONFIG["target_length_secs"] * AUDIO_CONFIG["sample_rate"])
@@ -22,28 +25,43 @@ mel_spectrogram_transformer = T.MelSpectrogram(
     n_fft=AUDIO_CONFIG["n_fft"],
     win_length=AUDIO_CONFIG["win_length"],
     hop_length=AUDIO_CONFIG["hop_length"],
-    n_mels=AUDIO_CONFIG["n_mels"]
+    n_mels=AUDIO_CONFIG["n_mels"],
+    f_min=AUDIO_CONFIG["f_min"],
+    f_max=AUDIO_CONFIG["f_max"],
+    normalized=True 
 )
 
-
-def audio_to_mel_spectrogram(audio_path: str) -> torch.Tensor:
+def load_audio_waveform(audio_path: str) -> torch.Tensor:
+    """Loads audio, resamples, mixes to mono, pads/crops to target length."""
     try:
-        #加载音频
-        waveform, sr = torchaudio.load(audio_path)
+        # Use soundfile backend directly
+        wav_numpy, sr = sf.read(audio_path)
+        
+        # Safety Check: Limit memory usage (e.g., max 50M samples ~ 200MB float32)
+        if wav_numpy.size > 50_000_000:
+             print(f"Warning: Audio file {audio_path} is too large ({wav_numpy.size} samples). Skipping.")
+             return None
+
+        waveform = torch.from_numpy(wav_numpy).float()
+        if waveform.ndim == 1:
+            waveform = waveform.unsqueeze(0)
+        else:
+            waveform = waveform.t()
+            
     except Exception as e:
-        print(f"{e}")
+        print(f"Error loading {audio_path}: {e}")
         return None
 
-    #重采样
+    # Resample
     if sr != AUDIO_CONFIG["sample_rate"]:
         resampler = T.Resample(orig_freq=sr, new_freq=AUDIO_CONFIG["sample_rate"])
         waveform = resampler(waveform)
 
-    #确保单声道
+    # Mix to Mono
     if waveform.shape[0] > 1:
         waveform = torch.mean(waveform, dim=0, keepdim=True)
 
-    #标准化
+    # Fix Length (Pad/Crop)
     current_length = waveform.shape[1]
     target_length = AUDIO_CONFIG["target_length_frames"]
     if current_length > target_length:
@@ -51,24 +69,33 @@ def audio_to_mel_spectrogram(audio_path: str) -> torch.Tensor:
     else:
         padding = target_length - current_length
         waveform = torch.nn.functional.pad(waveform, (0, padding))
+        
+    return waveform
 
-    #归一化
-    rms_db = 20 * torch.log10(torch.sqrt(torch.mean(waveform ** 2)))
+def waveform_to_mel(waveform: torch.Tensor) -> torch.Tensor:
+    """Converts waveform to Log Mel Spectrogram."""
+    
+    # Peak Normalize (Optional, but good practice before Mel)
+    # Note: prepare_deepship_data already does this, but after augmentation we might need re-norm
+    # RMS Normalize as per original code
+    rms_db = 20 * torch.log10(torch.sqrt(torch.mean(waveform ** 2)) + 1e-9)
     gain = 10 ** ((AUDIO_CONFIG["target_db"] - rms_db) / 20)
     waveform = waveform * gain
 
-    #计算梅尔频谱图
+    # Mel Spectrogram
     mel_spec = mel_spectrogram_transformer(waveform)
     log_mel_spec = T.AmplitudeToDB()(mel_spec)
 
     return log_mel_spec
 
+def audio_to_mel_spectrogram(audio_path: str) -> torch.Tensor:
+    """Legacy wrapper for compatibility."""
+    waveform = load_audio_waveform(audio_path)
+    if waveform is None:
+        return None
+    return waveform_to_mel(waveform)
 
 if __name__ == '__main__':
-    # 测试
-    test_audio_path = 'data/yourdatapath'
-
-    mel_tensor = audio_to_mel_spectrogram(test_audio_path)
-
-    if mel_tensor is not None:
-        print(f"成功: {mel_tensor.shape}")
+    # Test
+    test_audio_path = 'data/deepship_processed/0/some_file.wav' # Adjust if needed
+    print(f"Testing preprocess with config: {AUDIO_CONFIG}")
