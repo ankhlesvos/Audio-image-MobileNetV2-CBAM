@@ -31,7 +31,9 @@ def test(config_path: str, model_path: str):
         num_classes=model_conf['num_classes'],
         in_channels=model_conf.get('in_channels', 3),
         model_config=model_conf.get('model_config'),
-        width_mult=model_conf.get('width_mult', 1.0)
+        width_mult=model_conf.get('width_mult', 1.0),
+        asymmetric=model_conf.get('asymmetric', False),
+        force_no_residual=model_conf.get('force_no_residual', False)
     )
 
     state_dict = torch.load(model_path, map_location=device)

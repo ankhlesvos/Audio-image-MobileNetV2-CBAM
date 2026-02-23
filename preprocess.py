@@ -12,10 +12,10 @@ AUDIO_CONFIG = {
     "win_length": 2048,  # Match n_fft
     "hop_length": 512,  # ~32ms stride
     "n_mels": 160,  # Increased vertical resolution (User Request: 160 to compensate for bandwidth)
-    "f_min": 0,     # Capture low frequencies
-    "f_max": 8000,  # Expanded to 8000Hz (Nyquist) to capture high-freq textures
+    "f_min": 20,     # Capture low frequencies (Exclude DC/extreme sub-bass)
+    "f_max": 3000,  # Focus on ship noise band (Exclude ocean high-freq background)
     "target_db": -20.0,  # 音量归一化分贝值
-    "target_length_secs": 5,  # Increased to 5s to capture more rhythm/periodicity
+    "target_length_secs": 3,  # Adjusted to match prepare_deepship_data.py (3 seconds)
 }
 
 AUDIO_CONFIG["target_length_frames"] = int(AUDIO_CONFIG["target_length_secs"] * AUDIO_CONFIG["sample_rate"])

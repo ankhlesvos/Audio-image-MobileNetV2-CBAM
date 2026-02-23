@@ -24,7 +24,7 @@ CLASS_OVERLAP_RATIOS = {
     0: 0.5,   # Cargo (Base)
     1: 0.7,   # Passengership (Target ~1.7x)
     2: 0.55,  # Tanker (Target ~1.1x)
-    3: 0.85   # Tug (Target ~3.5-4x - Heavy overlap for minority class)
+    3: 0.7    # Tug (Target ~3.5-4x - Reduced from 0.85 to prevent heavy overfitting)
 }
 
 CLASS_MAP = {
