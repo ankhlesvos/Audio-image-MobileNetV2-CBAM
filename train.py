@@ -102,7 +102,8 @@ def train(config_path: str):
         width_mult=width_mult,
         in_channels=model_conf.get('in_channels', 1),
         asymmetric=model_conf.get('asymmetric', False),
-        force_no_residual=model_conf.get('force_no_residual', False)
+        force_no_residual=model_conf.get('force_no_residual', False),
+        audio_mode=model_conf.get('audio_mode', False)
     )
     model.to(device)
     print("模型结构:")

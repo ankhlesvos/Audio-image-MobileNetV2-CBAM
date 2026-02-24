@@ -25,7 +25,8 @@ BASE_CONFIG_TEMPLATE = {
         'model_config': None,
         # Ablation flags
         'asymmetric': False,
-        'force_no_residual': False
+        'force_no_residual': False,
+        'audio_mode': False
     }
 }
 
@@ -66,6 +67,17 @@ CONFIG_SE_ALL = [
     [6, 320, 1, 1, 3]
 ]
 
+# Config with Frequency Attention at s24 (M6)
+CONFIG_FREQ_S24 = [
+    [1, 16, 1, 1, 0],
+    [6, 24, 2, 2, 4], # s24 (Stage 2) attention=4 (freq)
+    [6, 32, 3, 1, 0],
+    [6, 64, 4, 2, 4], # s24 (Stage 4) attention=4 (freq)
+    [6, 96, 3, 1, 0],
+    [6, 160, 3, 1, 0],
+    [6, 320, 1, 1, 0]
+]
+
 EXPERIMENTS = {
     "M1_BasicCNN": {
         "model_config": CONFIG_BASE,
@@ -90,7 +102,14 @@ EXPERIMENTS = {
     "M5_MobileNetV2_CBAM_Asym": {
         "model_config": CONFIG_CBAM_S24,
         "force_no_residual": False,
-        "asymmetric": True
+        "asymmetric": True,
+        "audio_mode": False
+    },
+    "M6_AudioMobileNetV2": {
+        "model_config": CONFIG_FREQ_S24,
+        "force_no_residual": False,
+        "asymmetric": True,
+        "audio_mode": True
     },
 }
 
@@ -113,8 +132,9 @@ def main():
         
         # Apply specific settings
         current_config['model_conf']['model_config'] = setup['model_config']
-        current_config['model_conf']['asymmetric'] = setup['asymmetric']
-        current_config['model_conf']['force_no_residual'] = setup['force_no_residual']
+        current_config['model_conf']['asymmetric'] = setup.get('asymmetric', False)
+        current_config['model_conf']['force_no_residual'] = setup.get('force_no_residual', False)
+        current_config['model_conf']['audio_mode'] = setup.get('audio_mode', False)
         current_config['train_conf']['save_model_dir'] = f'saved_models/{exp_name}'
 
         config_path = configs_dir / f"{exp_name}_config.yml"

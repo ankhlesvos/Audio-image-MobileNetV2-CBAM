@@ -33,7 +33,8 @@ def test(config_path: str, model_path: str):
         model_config=model_conf.get('model_config'),
         width_mult=model_conf.get('width_mult', 1.0),
         asymmetric=model_conf.get('asymmetric', False),
-        force_no_residual=model_conf.get('force_no_residual', False)
+        force_no_residual=model_conf.get('force_no_residual', False),
+        audio_mode=model_conf.get('audio_mode', False)
     )
 
     state_dict = torch.load(model_path, map_location=device)

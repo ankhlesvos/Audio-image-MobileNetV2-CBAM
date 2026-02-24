@@ -26,14 +26,32 @@ class SELayer(nn.Module):
         y = self.fc(y).view(b, c, 1, 1)
         return x * y.expand_as(x)
 
+class FrequencyAttention(nn.Module):
+    def __init__(self, in_planes, reduction=8):
+        super(FrequencyAttention, self).__init__()
+        # Pool time axis (W) to 1, keep frequency axis (H) and channels
+        self.avg_pool = nn.AdaptiveAvgPool2d((None, 1))
+        self.fc = nn.Sequential(
+            nn.Conv2d(in_planes, max(1, in_planes // reduction), kernel_size=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(max(1, in_planes // reduction), in_planes, kernel_size=1, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        y = self.avg_pool(x)
+        y = self.fc(y)
+        return x * y
+
 class AsymmetricConv(nn.Module):
     def __init__(self, in_planes, out_planes, kernel_size, stride=1, padding=0, groups=1, bias=False):
         super(AsymmetricConv, self).__init__()
+        stride_h, stride_w = stride if isinstance(stride, tuple) else (stride, stride)
         self.conv = nn.Sequential(
-             nn.Conv2d(in_planes, out_planes, kernel_size=(kernel_size, 1), stride=(stride, 1), padding=(padding, 0), groups=groups, bias=bias),
+             nn.Conv2d(in_planes, out_planes, kernel_size=(kernel_size, 1), stride=(stride_h, 1), padding=(padding, 0), groups=groups, bias=bias),
              nn.BatchNorm2d(out_planes),
              nn.ReLU6(inplace=True),
-             nn.Conv2d(out_planes, out_planes, kernel_size=(1, kernel_size), stride=(1, stride), padding=(0, padding), groups=groups, bias=bias),
+             nn.Conv2d(out_planes, out_planes, kernel_size=(1, kernel_size), stride=(1, stride_w), padding=(0, padding), groups=groups, bias=bias),
         )
     def forward(self, x):
         return self.conv(x)
@@ -98,8 +116,8 @@ class InvertedResidual(nn.Module):
     def __init__(self, inp, oup, stride, expand_ratio, attention_mode=None, asymmetric=False, use_res_connect=True):
         super(InvertedResidual, self).__init__()
         self.stride = stride
-        assert stride in [1, 2]
-        assert attention_mode in ['pre_dw', 'post_dw', 'se', None]
+        assert isinstance(stride, tuple) or stride in [1, 2]
+        assert attention_mode in ['pre_dw', 'post_dw', 'se', 'freq', None]
         hidden_dim = int(round(inp * expand_ratio))
         
         # Determine residuals: Only if stride=1, inp=oup, AND manually allowed
@@ -125,6 +143,8 @@ class InvertedResidual(nn.Module):
             layers.append(CBAM(hidden_dim))
         elif attention_mode == 'se':
             layers.append(SELayer(hidden_dim))
+        elif attention_mode == 'freq':
+            layers.append(FrequencyAttention(hidden_dim))
             
         layers.extend([nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False), nn.BatchNorm2d(oup)])
         self.conv = nn.Sequential(*layers)
@@ -137,10 +157,11 @@ class InvertedResidual(nn.Module):
 
 class MyNet(nn.Module):
     def __init__(self, num_classes=1000, model_config=None, width_mult=1.0, in_channels=1,
-                 asymmetric=False, force_no_residual=False):
+                 asymmetric=False, force_no_residual=False, audio_mode=False):
         super(MyNet, self).__init__()
         self.asymmetric = asymmetric
         self.force_no_residual = force_no_residual
+        self.audio_mode = audio_mode
 
         if model_config is None:
             model_config = [
@@ -157,20 +178,27 @@ class MyNet(nn.Module):
         # Standard MobileNetV2 usually has residuals where possible
         self.use_res_connect = True 
         
-        attn_map = {0: None, 1: 'post_dw', 2: 'pre_dw', 3: 'se'} # 3 for SE
+        attn_map = {0: None, 1: 'post_dw', 2: 'pre_dw', 3: 'se', 4: 'freq'} # 4 for Frequency Attention
         block = InvertedResidual
         stem_output_channel = 32
         last_channel = 1280
         stem_output_channel = int(stem_output_channel * width_mult)
         self.last_channel = int(last_channel * max(1.0, width_mult))
         features = []
-        features.append(ConvBNReLU(in_channels, stem_output_channel, kernel_size=3, stride=2, groups=1))
+        
+        stem_stride = (1, 2) if audio_mode else 2
+        features.append(ConvBNReLU(in_channels, stem_output_channel, kernel_size=3, stride=stem_stride, groups=1))
         current_channels = stem_output_channel
         for t, c, n, s, attn_code in model_config:
             output_channel = int(c * width_mult)
             attention_mode = attn_map.get(attn_code)
             for i in range(n):
-                stride = s if i == 0 else 1
+                if i == 0:
+                    stride = s
+                    if self.audio_mode and stride == 2:
+                        stride = (1, 2) # keep H, pool W
+                else:
+                    stride = 1
                 
                 # Check for global flags
                 asymmetric_flag = getattr(self, 'asymmetric', False)
