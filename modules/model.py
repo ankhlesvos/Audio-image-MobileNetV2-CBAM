@@ -112,8 +112,47 @@ class ConvBNReLU(nn.Sequential):
             nn.ReLU6(inplace=True)
         )
 
+class MixConv(nn.Module):
+    def __init__(self, in_planes, out_planes, stride=1, asymmetric=False):
+        super(MixConv, self).__init__()
+        
+        if in_planes < 3:
+            self.c1 = in_planes
+            self.c2 = 0
+            self.c3 = 0
+        else:
+            self.c1 = in_planes // 3
+            self.c2 = in_planes // 3
+            self.c3 = in_planes - self.c1 - self.c2
+            
+        if asymmetric:
+            self.conv3 = AsymmetricConv(self.c1, self.c1, kernel_size=3, stride=stride, padding=1, groups=self.c1)
+            if self.c2 > 0:
+                self.conv5 = AsymmetricConv(self.c2, self.c2, kernel_size=5, stride=stride, padding=2, groups=self.c2)
+            if self.c3 > 0:
+                self.conv7 = AsymmetricConv(self.c3, self.c3, kernel_size=7, stride=stride, padding=3, groups=self.c3)
+        else:
+            self.conv3 = ConvBNReLU(self.c1, self.c1, kernel_size=3, stride=stride, groups=self.c1)
+            if self.c2 > 0:
+                self.conv5 = ConvBNReLU(self.c2, self.c2, kernel_size=5, stride=stride, groups=self.c2)
+            if self.c3 > 0:
+                self.conv7 = ConvBNReLU(self.c3, self.c3, kernel_size=7, stride=stride, groups=self.c3)
+
+    def forward(self, x):
+        if self.c2 == 0:
+            return self.conv3(x)
+        if self.c3 == 0:
+            x1, x2 = torch.split(x, [self.c1, self.c2], dim=1)
+            return torch.cat([self.conv3(x1), self.conv5(x2)], dim=1)
+            
+        x1, x2, x3 = torch.split(x, [self.c1, self.c2, self.c3], dim=1)
+        out1 = self.conv3(x1)
+        out2 = self.conv5(x2)
+        out3 = self.conv7(x3)
+        return torch.cat([out1, out2, out3], dim=1)
+
 class InvertedResidual(nn.Module):
-    def __init__(self, inp, oup, stride, expand_ratio, attention_mode=None, asymmetric=False, use_res_connect=True):
+    def __init__(self, inp, oup, stride, expand_ratio, attention_mode=None, asymmetric=False, multiscale=False, use_res_connect=True):
         super(InvertedResidual, self).__init__()
         self.stride = stride
         assert isinstance(stride, tuple) or stride in [1, 2]
@@ -130,12 +169,13 @@ class InvertedResidual(nn.Module):
         if attention_mode == 'pre_dw':
             layers.append(CBAM(hidden_dim))
             
-        # Depthwise Conv (Standard or Asymmetric)
-        if asymmetric:
-             # Using factorized 3x3 conv (3x1 then 1x3)
-             padding = (3 - 1) // 2
-             layers.append(AsymmetricConv(hidden_dim, hidden_dim, kernel_size=3, stride=stride, padding=padding, groups=hidden_dim, bias=False))
-             # AsymmetricConv already has BN/ReLU6 inside
+        # Depthwise Conv (Standard, Asymmetric, or MixConv)
+        if multiscale:
+             layers.append(MixConv(hidden_dim, hidden_dim, stride=stride, asymmetric=asymmetric))
+        elif asymmetric:
+             # Using factorized 7x7 conv (7x1 then 1x7)
+             padding = (7 - 1) // 2
+             layers.append(AsymmetricConv(hidden_dim, hidden_dim, kernel_size=7, stride=stride, padding=padding, groups=hidden_dim, bias=False))
         else:
              layers.append(ConvBNReLU(hidden_dim, hidden_dim, kernel_size=3, stride=stride, groups=hidden_dim))
              
@@ -157,9 +197,10 @@ class InvertedResidual(nn.Module):
 
 class MyNet(nn.Module):
     def __init__(self, num_classes=1000, model_config=None, width_mult=1.0, in_channels=1,
-                 asymmetric=False, force_no_residual=False, audio_mode=False):
+                 asymmetric=False, multiscale=False, force_no_residual=False, audio_mode=False):
         super(MyNet, self).__init__()
         self.asymmetric = asymmetric
+        self.multiscale = multiscale
         self.force_no_residual = force_no_residual
         self.audio_mode = audio_mode
 
@@ -202,10 +243,12 @@ class MyNet(nn.Module):
                 
                 # Check for global flags
                 asymmetric_flag = getattr(self, 'asymmetric', False)
+                multiscale_flag = getattr(self, 'multiscale', False)
                 use_res_connect = not getattr(self, 'force_no_residual', False)
 
                 features.append(block(current_channels, output_channel, stride, expand_ratio=t,
                                       attention_mode=attention_mode, asymmetric=asymmetric_flag,
+                                      multiscale=multiscale_flag,
                                       use_res_connect=use_res_connect))
                 current_channels = output_channel
         features.append(ConvBNReLU(current_channels, self.last_channel, kernel_size=1, stride=1, groups=1))

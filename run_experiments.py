@@ -26,6 +26,7 @@ BASE_CONFIG_TEMPLATE = {
         'model_config': None,
         # Ablation flags
         'asymmetric': False,
+        'multiscale': False,
         'force_no_residual': False,
         'audio_mode': False
     }
@@ -104,6 +105,7 @@ EXPERIMENTS = {
         "model_config": CONFIG_CBAM_S24,
         "force_no_residual": False,
         "asymmetric": True,
+        "multiscale": True,
         "audio_mode": False
     },
     "M6_AudioMobileNetV2": {
@@ -136,6 +138,7 @@ def main():
         # Apply specific settings
         current_config['model_conf']['model_config'] = setup['model_config']
         current_config['model_conf']['asymmetric'] = setup.get('asymmetric', False)
+        current_config['model_conf']['multiscale'] = setup.get('multiscale', False)
         current_config['model_conf']['force_no_residual'] = setup.get('force_no_residual', False)
         current_config['model_conf']['audio_mode'] = setup.get('audio_mode', False)
         current_config['train_conf']['save_model_dir'] = f'saved_models/{exp_name}'

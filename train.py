@@ -102,6 +102,7 @@ def train(config_path: str):
         width_mult=width_mult,
         in_channels=model_conf.get('in_channels', 1),
         asymmetric=model_conf.get('asymmetric', False),
+        multiscale=model_conf.get('multiscale', False),
         force_no_residual=model_conf.get('force_no_residual', False),
         audio_mode=model_conf.get('audio_mode', False)
     )
@@ -125,9 +126,25 @@ def train(config_path: str):
     
     # --- 5. 定义损失函数和优化器 ---
     print("\n--- 5. 定义损失函数和优化器 ---")
-    # Label Smoothing added as per user suggestion
-    criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
+    
+    class FocalLoss(nn.Module):
+        def __init__(self, weight=None, gamma=2.0, reduction='mean', label_smoothing=0.0):
+            super(FocalLoss, self).__init__()
+            self.ce = nn.CrossEntropyLoss(weight=weight, reduction='none', label_smoothing=label_smoothing)
+            self.gamma = gamma
+            self.reduction = reduction
 
+        def forward(self, inputs, targets):
+            ce_loss = self.ce(inputs, targets)
+            pt = torch.exp(-ce_loss)
+            loss = ((1 - pt) ** self.gamma) * ce_loss
+            if self.reduction == 'mean':
+                return loss.mean()
+            elif self.reduction == 'sum':
+                return loss.sum()
+            return loss
+
+    criterion = FocalLoss(weight=class_weights, gamma=2.0, label_smoothing=0.1)
 
     optimizer = optim.AdamW(
         params=model.parameters(),
@@ -192,10 +209,17 @@ def train(config_path: str):
             optimizer.zero_grad()
             outputs = model(inputs)
             
-            # Calculate loss per sample
-            # We need to temporarily set reduction='none' or use functional interface
-            loss_a = torch.nn.functional.cross_entropy(outputs, label_a, weight=class_weights, reduction='none')
-            loss_b = torch.nn.functional.cross_entropy(outputs, label_b, weight=class_weights, reduction='none')
+            # Calculate loss per sample using Focal Loss (which uses reduction='none' internally)
+            # However, our local FocalLoss with reduction='none' could be used:
+            # wait, criterion handles focal loss, but we specifically need 'none' for manual mixup mean.
+            # Local definition of focal loss with reduction='none':
+            ce_loss_a = torch.nn.functional.cross_entropy(outputs, label_a, weight=class_weights, reduction='none')
+            pt_a = torch.exp(-ce_loss_a)
+            loss_a = ((1 - pt_a) ** 2.0) * ce_loss_a
+
+            ce_loss_b = torch.nn.functional.cross_entropy(outputs, label_b, weight=class_weights, reduction='none')
+            pt_b = torch.exp(-ce_loss_b)
+            loss_b = ((1 - pt_b) ** 2.0) * ce_loss_b
             
             loss = loss_a * lam + loss_b * (1 - lam)
             loss = loss.mean()
