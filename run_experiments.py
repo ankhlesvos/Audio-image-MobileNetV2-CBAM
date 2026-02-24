@@ -1,5 +1,6 @@
 import yaml
 import os
+import sys
 import subprocess
 from pathlib import Path
 
@@ -7,7 +8,7 @@ from pathlib import Path
 BASE_CONFIG_TEMPLATE = {
     'train_conf': {
         'use_gpu': True,
-        'batch_size': 16, # Reduced to 16 to avoid OOM. Adjust if needed.
+        'batch_size': 8, # Reduced to 16 to avoid OOM. Adjust if needed.
         'num_workers': 4,
         'max_epoch': 50,
         'learning_rate': 0.001,
@@ -123,6 +124,8 @@ def main():
         f.write("-" * 60 + "\n")
 
     for exp_name, setup in EXPERIMENTS.items():
+        if exp_name not in ["M4_MobileNetV2_CBAM", "M5_MobileNetV2_CBAM_Asym", "M6_AudioMobileNetV2"]:
+            continue
         print(f"\n{'=' * 20} Starting Experiment: {exp_name} {'=' * 20}")
 
         current_config = BASE_CONFIG_TEMPLATE.copy()
@@ -143,7 +146,7 @@ def main():
         print(f"Config generated: {config_path}")
 
         command = [
-            "python",
+            sys.executable,
             "train.py",
             "-c",
             str(config_path)
