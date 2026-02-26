@@ -10,7 +10,7 @@ BASE_CONFIG_TEMPLATE = {
         'use_gpu': True,
         'batch_size': 8, # Reduced to 16 to avoid OOM. Adjust if needed.
         'num_workers': 4,
-        'max_epoch': 30,
+        'max_epoch': 50,
         'learning_rate': 0.001,
         'weight_decay': 1e-4,
         'save_model_dir': None,

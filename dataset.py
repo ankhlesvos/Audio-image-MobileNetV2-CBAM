@@ -11,28 +11,6 @@ from typing import List, Dict, Tuple, Optional
 from preprocess import load_audio_waveform, waveform_to_mel, AUDIO_CONFIG
 
 
-class GaussianNoise:
-    """Adds random Gaussian Noise to the waveform."""
-    def __init__(self, min_snr=10, max_snr=30, p=0.5):
-        self.min_snr = min_snr
-        self.max_snr = max_snr
-        self.p = p
-
-    def __call__(self, waveform):
-        if random.random() > self.p:
-            return waveform
-            
-        snr = random.uniform(self.min_snr, self.max_snr)
-        
-        signal_power = torch.mean(waveform ** 2)
-        if signal_power == 0:
-            return waveform
-            
-        noise_power = signal_power / (10 ** (snr / 10))
-        noise = torch.randn_like(waveform) * torch.sqrt(noise_power)
-        
-        return waveform + noise
-
 class AddBackgroundNoise:
     """Adds synthetic Pink Noise to the waveform."""
     def __init__(self, target_snr_db_low=10, target_snr_db_high=30, p=0.5):
@@ -131,12 +109,8 @@ class AudioDataset(Dataset):
 
         # Initialize SpecAugment for training (applied on Mel)
         if self.train:
-            self.freq_mask = T.FrequencyMasking(freq_mask_param=15)
-            self.time_mask = T.TimeMasking(time_mask_param=35)
-            
             # Waveform transformations
-            self.add_noise = AddBackgroundNoise(p=0.4)
-            self.gaussian_noise = GaussianNoise(p=0.4)
+            self.add_noise = AddBackgroundNoise(p=0.5)
             self.speed_perturb = SpeedPerturbation(orig_freq=AUDIO_CONFIG["sample_rate"], p=0.3)
             
             # Augmentation Probabilities
@@ -304,7 +278,6 @@ class AudioDataset(Dataset):
             
             # B. Standard Waveform Augs
             waveform = self.add_noise(waveform)
-            waveform = self.gaussian_noise(waveform)
             waveform = self.speed_perturb(waveform)
             
             # Re-fix length
@@ -340,11 +313,6 @@ class AudioDataset(Dataset):
                 
         # 4. Convert to Mel Spectrogram
         mel_spectrogram = waveform_to_mel(waveform)
-
-        # 5. SpecAugment (Train only)
-        if self.train:
-            mel_spectrogram = self.freq_mask(mel_spectrogram)
-            mel_spectrogram = self.time_mask(mel_spectrogram)
 
         # 6. Return Tensors
         # Return signature: (input, label_a, label_b, lam)

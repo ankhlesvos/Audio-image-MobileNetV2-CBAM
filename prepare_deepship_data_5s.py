@@ -40,9 +40,9 @@ RMS_THRESHOLD = 0.005   # Filter out segments with RMS below this
 # overlap 0.8 -> stride = 32000 samples = 1s  (very fine-grained sampling)
 # overlap 0.9 -> stride = 16000 samples = 0.5s (very aggressive, for small datasets)
 CLASS_OVERLAP_RATIOS = {
-    0: 0.9,   # Cargo+Tug  - stride=0.5s
-    1: 0.9,   # Passengership - stride=0.5s (was 0.85, need more samples)
-    2: 0.9,   # Tanker - stride=0.5s
+    0: 0.85,  # Cargo+Tug
+    1: 0.96,  # Passengership - Extreme overlap to squeeze max data
+    2: 0.94,  # Tanker
 }
 
 # New 3-class mapping: Cargo+Tug -> 0, Passengership -> 1, Tanker -> 2
@@ -197,6 +197,17 @@ def main():
         segments = process_file(file_path, TARGET_DIR, class_id, is_train=True)
         for seg_path, cid in segments:
             class_segments[cid].append(f"{seg_path}\t{cid}\n")
+
+    raw_counts = {cid: len(lines) for cid, lines in class_segments.items()}
+    print(f"Raw segment counts before balancing: {raw_counts}")
+    
+    # NEW CODE: Undersampling to balance dataset
+    min_count = min(raw_counts.values())
+    print(f"Undersampling all classes to min = {min_count} segments (balanced)")
+    
+    for cid in class_segments:
+        if len(class_segments[cid]) > min_count:
+            class_segments[cid] = random.sample(class_segments[cid], min_count)
 
     # Shuffle and write all segments
     all_train_lines = []

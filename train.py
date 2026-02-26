@@ -112,58 +112,6 @@ def train(config_path: str):
     # 简单的模型结构打印
     # print(model)
 
-    # --- Transfer Learning: Load ImageNet Weights ---
-    import torchvision.models as models
-    print("\n--- Loading Pretrained ImageNet Weights ---")
-    try:
-        pretrained_model = models.mobilenet_v2(pretrained=True)
-        pretrained_dict = pretrained_model.state_dict()
-        model_dict = model.state_dict()
-        
-        mapped_dict = {}
-        matched = 0
-        pretrained_keys = list(pretrained_dict.keys())
-        
-        for m_key in model_dict.keys():
-            m_shape = model_dict[m_key].shape
-            
-            # 1. Stem Convolution (RGB 3-channel -> 1-channel Grayscale/Mel)
-            if 'features.0.0.weight' in m_key:
-                if 'features.0.0.weight' in pretrained_dict:
-                    rgb_weight = pretrained_dict['features.0.0.weight']
-                    mapped_dict[m_key] = torch.sum(rgb_weight, dim=1, keepdim=True)
-                    matched += 1
-                    pretrained_keys.remove('features.0.0.weight')
-                continue
-                
-            # 2. Exact name match (for standard blocks)
-            if m_key in pretrained_dict and m_shape == pretrained_dict[m_key].shape:
-                mapped_dict[m_key] = pretrained_dict[m_key]
-                matched += 1
-                if m_key in pretrained_keys:
-                    pretrained_keys.remove(m_key)
-                continue
-                
-            # 3. Shape and type based lookahead match (for blocks shifted by CBAM/Asym)
-            found = False
-            for i, p_key in enumerate(pretrained_keys[:15]): # Lookahead window of 15 tensors
-                p_shape = pretrained_dict[p_key].shape
-                if m_shape == p_shape:
-                    # Sanity check: Ensure we don't map a conv weight to a BN mean, etc.
-                    type_m = m_key.split('.')[-1]
-                    type_p = p_key.split('.')[-1]
-                    if type_m == type_p:
-                        mapped_dict[m_key] = pretrained_dict[p_key]
-                        matched += 1
-                        pretrained_keys.pop(i)
-                        found = True
-                        break
-            
-        model_dict.update(mapped_dict)
-        model.load_state_dict(model_dict)
-        print(f"Successfully mapped {matched} / {len(model_dict)} weight tensors from ImageNet.")
-    except Exception as e:
-        print(f"Pretrained weight loading failed: {e}")
 
     # Calculate GFLOPs/Params
     try:
