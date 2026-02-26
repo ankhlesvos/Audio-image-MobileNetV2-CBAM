@@ -33,6 +33,7 @@ def test(config_path: str, model_path: str):
         model_config=model_conf.get('model_config'),
         width_mult=model_conf.get('width_mult', 1.0),
         asymmetric=model_conf.get('asymmetric', False),
+        multiscale=model_conf.get('multiscale', False),
         force_no_residual=model_conf.get('force_no_residual', False),
         audio_mode=model_conf.get('audio_mode', False)
     )
@@ -132,7 +133,7 @@ def test(config_path: str, model_path: str):
     file_acc = accuracy_score(file_gt, file_pred_vote)
     print(f"File-Level Accuracy: {file_acc:.4f}")
 
-    class_names = ["Cargo", "Passengership", "Tanker", "Tug"] 
+    class_names = ["Cargo+Tug", "Passengership", "Tanker"]
     
     p, r, f1, s = precision_recall_fscore_support(file_gt, file_pred_vote, average=None, labels=range(len(class_names)))
 

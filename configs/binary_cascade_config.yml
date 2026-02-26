@@ -1,0 +1,24 @@
+data_conf:
+  train_list: 'data/binary_train_list.txt'
+  test_list: 'data/binary_test_list.txt'
+
+train_conf:
+  batch_size: 32  # Good size for binary model
+  learning_rate: 0.001
+  max_epoch: 50
+  use_gpu: True
+  num_workers: 4
+  save_model_dir: 'saved_models/binary_cascade/'
+  weight_decay: 1.0e-4
+  loss_conf:
+    gamma: 0.0    # Use standard Cross Entropy for the binary case to see pure discriminative power
+    label_smoothing: 0.0
+    pair_penalty:
+      use_penalty: False
+
+model_conf:
+  num_classes: 2  # Binary classification
+  width_mult: 0.5 # Lighter model as it's a specialized second stage
+  in_channels: 1
+  # model_config can be added if specific MobileNetV2 structure is needed, 
+  # otherwise uses default in model.py

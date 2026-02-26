@@ -10,17 +10,29 @@ BASE_CONFIG_TEMPLATE = {
         'use_gpu': True,
         'batch_size': 8, # Reduced to 16 to avoid OOM. Adjust if needed.
         'num_workers': 4,
-        'max_epoch': 50,
+        'max_epoch': 30,
         'learning_rate': 0.001,
         'weight_decay': 1e-4,
-        'save_model_dir': None
+        'save_model_dir': None,
+        'loss_conf': {
+            'gamma': 2.0,
+            'label_smoothing': 0.1,
+            'pair_penalty': {
+                'use_penalty': False,
+                'weight': 2.0,
+                'targets': [
+                    [1, 2],   # Passengership misclassified as Tanker
+                    [2, 0],   # Tanker misclassified as Cargo+Tug
+                ]
+            }
+        }
     },
     'data_conf': {
-        'train_list': 'data/train_list.txt',
-        'test_list': 'data/test_list.txt'
+        'train_list': 'data/train_list_5s.txt',
+        'test_list': 'data/test_list_5s.txt'
     },
     'model_conf': {
-        'num_classes': 4,
+        'num_classes': 3,
         'in_channels': 1,
         'width_mult': 1.0,
         'model_config': None,
@@ -126,7 +138,7 @@ def main():
         f.write("-" * 60 + "\n")
 
     for exp_name, setup in EXPERIMENTS.items():
-        if exp_name not in ["M4_MobileNetV2_CBAM", "M5_MobileNetV2_CBAM_Asym", "M6_AudioMobileNetV2"]:
+        if exp_name not in ["M4_MobileNetV2_CBAM", "M5_MobileNetV2_CBAM_Asym"]:
             continue
         print(f"\n{'=' * 20} Starting Experiment: {exp_name} {'=' * 20}")
 

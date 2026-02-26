@@ -15,7 +15,7 @@ AUDIO_CONFIG = {
     "f_min": 20,     # Capture low frequencies (Exclude DC/extreme sub-bass)
     "f_max": 3000,  # Focus on ship noise band (Exclude ocean high-freq background)
     "target_db": -20.0,  # 音量归一化分贝值
-    "target_length_secs": 3,  # Adjusted to match prepare_deepship_data.py (3 seconds)
+    "target_length_secs": 5,  # Updated to 5 seconds to match prepare_deepship_data_5s.py
 }
 
 AUDIO_CONFIG["target_length_frames"] = int(AUDIO_CONFIG["target_length_secs"] * AUDIO_CONFIG["sample_rate"])

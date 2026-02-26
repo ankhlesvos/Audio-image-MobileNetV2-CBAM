@@ -67,7 +67,8 @@ def train(config_path: str):
             pass
     
     # Sort by key to ensure order [0, 1, 2, 3]
-    counts = [class_counts.get(i, 0) for i in range(4)]
+    num_classes = model_conf['num_classes']
+    counts = [class_counts.get(i, 0) for i in range(num_classes)]
     print(f"Class Counts: {counts}")
     
     beta = 0.9999
@@ -82,14 +83,14 @@ def train(config_path: str):
     
     # Normalize (sum to 4? or sum to num_valid_classes? usually sum to num_classes)
     if np.sum(weights) > 0:
-        weights = weights / np.sum(weights) * 4 # Normalize so mean weight is 1.0
+        weights = weights / np.sum(weights) * num_classes # Normalize so mean weight is 1.0
     else:
         # Fallback if no data (should not happen in real training except debug)
         weights = np.ones(4)
 
     
     class_weights = torch.tensor(weights).float().to(device)
-    print(f"Class Weights: {class_weights}")
+    print(f"Class Weights (Re-enabled with Data Augmentation): {class_weights}")
 
 
     # --- 4. 构建模型 ---
@@ -109,7 +110,60 @@ def train(config_path: str):
     model.to(device)
     print("模型结构:")
     # 简单的模型结构打印
-    print(model)
+    # print(model)
+
+    # --- Transfer Learning: Load ImageNet Weights ---
+    import torchvision.models as models
+    print("\n--- Loading Pretrained ImageNet Weights ---")
+    try:
+        pretrained_model = models.mobilenet_v2(pretrained=True)
+        pretrained_dict = pretrained_model.state_dict()
+        model_dict = model.state_dict()
+        
+        mapped_dict = {}
+        matched = 0
+        pretrained_keys = list(pretrained_dict.keys())
+        
+        for m_key in model_dict.keys():
+            m_shape = model_dict[m_key].shape
+            
+            # 1. Stem Convolution (RGB 3-channel -> 1-channel Grayscale/Mel)
+            if 'features.0.0.weight' in m_key:
+                if 'features.0.0.weight' in pretrained_dict:
+                    rgb_weight = pretrained_dict['features.0.0.weight']
+                    mapped_dict[m_key] = torch.sum(rgb_weight, dim=1, keepdim=True)
+                    matched += 1
+                    pretrained_keys.remove('features.0.0.weight')
+                continue
+                
+            # 2. Exact name match (for standard blocks)
+            if m_key in pretrained_dict and m_shape == pretrained_dict[m_key].shape:
+                mapped_dict[m_key] = pretrained_dict[m_key]
+                matched += 1
+                if m_key in pretrained_keys:
+                    pretrained_keys.remove(m_key)
+                continue
+                
+            # 3. Shape and type based lookahead match (for blocks shifted by CBAM/Asym)
+            found = False
+            for i, p_key in enumerate(pretrained_keys[:15]): # Lookahead window of 15 tensors
+                p_shape = pretrained_dict[p_key].shape
+                if m_shape == p_shape:
+                    # Sanity check: Ensure we don't map a conv weight to a BN mean, etc.
+                    type_m = m_key.split('.')[-1]
+                    type_p = p_key.split('.')[-1]
+                    if type_m == type_p:
+                        mapped_dict[m_key] = pretrained_dict[p_key]
+                        matched += 1
+                        pretrained_keys.pop(i)
+                        found = True
+                        break
+            
+        model_dict.update(mapped_dict)
+        model.load_state_dict(model_dict)
+        print(f"Successfully mapped {matched} / {len(model_dict)} weight tensors from ImageNet.")
+    except Exception as e:
+        print(f"Pretrained weight loading failed: {e}")
 
     # Calculate GFLOPs/Params
     try:
@@ -128,23 +182,50 @@ def train(config_path: str):
     print("\n--- 5. 定义损失函数和优化器 ---")
     
     class FocalLoss(nn.Module):
-        def __init__(self, weight=None, gamma=2.0, reduction='mean', label_smoothing=0.0):
+        def __init__(self, weight=None, gamma=2.0, reduction='mean', label_smoothing=0.0, pair_penalty=None):
             super(FocalLoss, self).__init__()
             self.ce = nn.CrossEntropyLoss(weight=weight, reduction='none', label_smoothing=label_smoothing)
             self.gamma = gamma
             self.reduction = reduction
+            self.pair_penalty = pair_penalty
 
         def forward(self, inputs, targets):
             ce_loss = self.ce(inputs, targets)
             pt = torch.exp(-ce_loss)
-            loss = ((1 - pt) ** self.gamma) * ce_loss
+            
+            if self.gamma > 0:
+                loss = ((1 - pt) ** self.gamma) * ce_loss
+            else:
+                loss = ce_loss
+
+            if self.pair_penalty and self.pair_penalty.get('use_penalty', False):
+                penalty_weight = self.pair_penalty.get('weight', 1.0)
+                penalty_targets = self.pair_penalty.get('targets', [])
+                
+                probs = torch.softmax(inputs, dim=1)
+                penalty = torch.zeros_like(loss)
+                
+                for true_class, false_class in penalty_targets:
+                    mask = (targets == true_class)
+                    if mask.any():
+                        penalty[mask] += probs[mask, false_class] * penalty_weight
+                        
+                loss = loss + penalty
+
             if self.reduction == 'mean':
                 return loss.mean()
             elif self.reduction == 'sum':
                 return loss.sum()
             return loss
 
-    criterion = FocalLoss(weight=class_weights, gamma=2.0, label_smoothing=0.1)
+    loss_conf = train_conf.get('loss_conf', {})
+    gamma = loss_conf.get('gamma', 2.0)
+    label_smoothing = loss_conf.get('label_smoothing', 0.1)
+    pair_penalty = loss_conf.get('pair_penalty', None)
+
+    # Use reduction='none' here because we manual calculate Mixup loss later
+    criterion_none = FocalLoss(weight=class_weights, gamma=gamma, reduction='none', 
+                               label_smoothing=label_smoothing, pair_penalty=pair_penalty)
 
     optimizer = optim.AdamW(
         params=model.parameters(),
@@ -166,6 +247,10 @@ def train(config_path: str):
     
     # Initialize f1 for saving results later
     f1 = 0.0
+    
+    # Early stopping config
+    patience = 5
+    epochs_no_improve = 0
 
     for epoch in range(train_conf['max_epoch']):
         # --- 训练阶段 ---
@@ -213,13 +298,8 @@ def train(config_path: str):
             # However, our local FocalLoss with reduction='none' could be used:
             # wait, criterion handles focal loss, but we specifically need 'none' for manual mixup mean.
             # Local definition of focal loss with reduction='none':
-            ce_loss_a = torch.nn.functional.cross_entropy(outputs, label_a, weight=class_weights, reduction='none')
-            pt_a = torch.exp(-ce_loss_a)
-            loss_a = ((1 - pt_a) ** 2.0) * ce_loss_a
-
-            ce_loss_b = torch.nn.functional.cross_entropy(outputs, label_b, weight=class_weights, reduction='none')
-            pt_b = torch.exp(-ce_loss_b)
-            loss_b = ((1 - pt_b) ** 2.0) * ce_loss_b
+            loss_a = criterion_none(outputs, label_a)
+            loss_b = criterion_none(outputs, label_b)
             
             loss = loss_a * lam + loss_b * (1 - lam)
             loss = loss.mean()
@@ -283,6 +363,13 @@ def train(config_path: str):
             best_model_path = save_dir / "best_model.pth"
             torch.save(model.state_dict(), best_model_path)
             print(f"  New best model saved to {best_model_path} with accuracy: {best_accuracy:.4f}")
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            print(f"  No improvement for {epochs_no_improve} epochs.")
+            if epochs_no_improve >= patience:
+                print(f"\nEarly stopping triggered after {epoch + 1} epochs!")
+                break
 
         # 更新学习率
         # Update learning rate
