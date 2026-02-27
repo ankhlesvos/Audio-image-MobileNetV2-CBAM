@@ -1,25 +1,19 @@
-# ================================================================
-# TinyAudioNet - Core Dependencies for Cross-Platform Use
-# ================================================================
+# Requirements optimized for Google Colab compatibility
+# Note: torch, torchvision, torchaudio, numpy, and scipy are typically pre-installed on Colab.
+# If they are missing or outdated, uncomment the following lines:
+# torch>=2.0.0
+# torchvision>=0.15.0
+# torchaudio>=2.0.0
+# numpy>=1.23.0
+# scipy>=1.10.0
 
-# --- Core Deep Learning Framework ---
-# We don't specify the version or CUDA build here.
-# Users are instructed to install PyTorch from the official website
-# according to their specific OS and CUDA version.
-# torch
-# torchvision
-# torchaudio
-
-# --- Data Processing & Scientific Computing ---
-numpy
-PyYAML
-scikit-learn
-matplotlib
-
-# --- Image & Audio Handling ---
-Pillow
-soundfile
-librosa
-
-# --- Utilities ---
-tqdm
+librosa>=0.10.0
+soundfile>=0.12.1
+audioread>=3.0.0
+thop>=0.1.1.post2209072238
+tqdm>=4.65.0
+PyYAML>=6.0
+scikit-learn>=1.2.0
+matplotlib>=3.7.0
+pandas>=2.0.0
+tensorboard>=2.14.0
