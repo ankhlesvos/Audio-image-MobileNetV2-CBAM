@@ -136,8 +136,41 @@ def process_file(file_path, target_dir, class_id, is_train=True):
 
 def main():
     if not os.path.exists(SOURCE_DIR):
-        print(f"Error: Source directory '{SOURCE_DIR}' not found.")
-        return
+        print(f"Directory '{SOURCE_DIR}' not found. Attempting to download and extract from GitHub...")
+        import urllib.request
+        import zipfile
+        
+        zip_url = "https://github.com/irfankamboh/DeepShip/archive/refs/heads/main.zip"
+        zip_path = "DeepShip-main.zip"
+        
+        if not os.path.exists(zip_path):
+            print(f"Downloading {zip_url} to {zip_path}... (This might take a while)")
+            try:
+                class DownloadProgressBar(tqdm):
+                    def update_to(self, b=1, bsize=1, tsize=None):
+                        if tsize is not None:
+                            self.total = tsize
+                        self.update(b * bsize - self.n)
+                
+                with DownloadProgressBar(unit='B', unit_scale=True, miniters=1, desc="DeepShip Dataset") as t:
+                    urllib.request.urlretrieve(zip_url, filename=zip_path, reporthook=t.update_to)
+            except Exception as e:
+                print(f"Failed to download ZIP: {e}")
+                print("Trying git clone fallback...")
+                os.system(f"git clone https://github.com/irfankamboh/DeepShip.git {SOURCE_DIR}")
+        
+        if os.path.exists(zip_path) and not os.path.exists(SOURCE_DIR):
+            print(f"Extracting {zip_path} to current directory...")
+            try:
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(".")
+                print("Extraction complete.")
+            except Exception as e:
+                print(f"Failed to extract ZIP: {e}")
+                
+        if not os.path.exists(SOURCE_DIR):
+            print(f"Error: Required source directory '{SOURCE_DIR}' could not be created/found.")
+            return
 
     # Create target directories (3 classes: 0, 1, 2)
     for class_id in [0, 1, 2]:

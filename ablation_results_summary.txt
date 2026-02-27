@@ -1,2 +1,3 @@
 Experiment | Best Acc | Best F1 | Sampler | Alpha | CE/FL | LA Train/Eval | Tau
 ----------------------------------------------------------------------------------------------------
+M5_Baseline | 0.7391 | 0.6822 | OFF | 0.5 | CE | F/F | 1.0
