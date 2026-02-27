@@ -9,6 +9,7 @@ import numpy as np
 from tqdm import tqdm
 import yaml
 import os
+import random
 from pathlib import Path
 
 from dataset import AudioDataset
@@ -32,6 +33,17 @@ def train(config_path: str):
     print("配置加载成功:")
     print(config)
 
+    # --- 1.5 全局随机种子 ---
+    seed = train_conf.get("seed", 42)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    
+    # Optional: deterministic mode (might slow down convolutions)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
     # --- 2. 设置设备 ---
     device = torch.device("cuda" if torch.cuda.is_available() and train_conf['use_gpu'] else "cpu")
     print(f"\n--- 2. 使用设备: {device} ---")
@@ -41,12 +53,93 @@ def train(config_path: str):
     train_dataset = AudioDataset(data_list_path=data_conf['train_list'], train=True)
     test_dataset = AudioDataset(data_list_path=data_conf['test_list'], train=False)
 
+    # --- Calculate Class Weights (ENS) & Prior ---
+    print("Calculating class weights (Effective Number of Samples) and Priors...")
+    from collections import Counter
+    labels = []
+    for line in train_dataset.lines:
+        try:
+            _, lab = line.split('\t')
+            labels.append(int(lab))
+        except:
+            labels.append(-1)
+
+    # 统计每类样本数（忽略坏样本）
+    valid_labels = [l for l in labels if l >= 0]
+    class_count = Counter(valid_labels)
+
+    # Sort by key to ensure order [0, 1, 2, 3] etc.
+    num_classes = model_conf['num_classes']
+    counts = [class_count.get(i, 0) for i in range(num_classes)]
+    print(f"Class Counts: {counts}")
+    
+    beta = 0.9999
+    effective_num = 1.0 - np.power(beta, counts)
+    # Handle zero counts: precise arithmetic.
+    weights = np.zeros_like(effective_num)
+    
+    valid_classes = effective_num > 1e-6 # float precision
+    weights[valid_classes] = (1.0 - beta) / np.array(effective_num)[valid_classes]
+    
+    if np.sum(weights) > 0:
+        weights = weights / np.sum(weights) * num_classes # Normalize so mean weight is 1.0
+    else:
+        weights = np.ones(num_classes)
+    
+    # Conditional Class Weights for CE Loss
+    if train_conf.get('use_class_weights', True):
+        class_weights = torch.tensor(weights).float().to(device)
+        print(f"Class Weights (CE Loss): {class_weights}")
+    else:
+        class_weights = None
+        print("Class Weights (CE Loss) are DISABLED.")
+
+    # Log prior for Logit Adjustment
+    sum_counts = sum(counts) if sum(counts) > 0 else 1
+    prior = np.array(counts, dtype=np.float64) / sum_counts
+    log_prior = torch.log(torch.tensor(prior, dtype=torch.float32) + 1e-12).to(device)
+
+    # --- 建立 DataLoader (使用 WeightedRandomSampler) ---
+    use_sampler = train_conf.get('use_sampler', False)
+    
+    if use_sampler and train_conf.get('use_class_weights', False):
+        print("\n[WARNING] You have enabled BOTH WeightedRandomSampler and CrossEntropy class_weights. "
+              "This duplicates priority over minority classes and can degrade performance. Proceed with caution.\n")
+        alpha = train_conf.get("sampler_alpha", 0.5)
+        print(f"Building WeightedRandomSampler with alpha={alpha}")
+        sample_weights = []
+        for l in labels:
+            if l < 0:
+                sample_weights.append(0.0)
+            else:
+                sample_weights.append(1.0 / (class_count[l] ** alpha))
+                
+        sample_weights_tensor = torch.as_tensor(sample_weights, dtype=torch.double)
+        
+        sampler = torch.utils.data.WeightedRandomSampler(
+            weights=sample_weights_tensor,
+            num_samples=len(sample_weights_tensor),
+            replacement=True
+        )
+        shuffle_flag = False
+    else:
+        print("WeightedRandomSampler is DISABLED. Using standard Shuffle.")
+        sampler = None
+        shuffle_flag = True
+
+    # Reproducibility
+    g = torch.Generator()
+    g.manual_seed(train_conf.get("seed", 42))
+
     train_loader = DataLoader(
         dataset=train_dataset,
         batch_size=train_conf['batch_size'],
-        shuffle=True,
-        num_workers=train_conf['num_workers']
+        shuffle=shuffle_flag,
+        sampler=sampler,
+        num_workers=train_conf['num_workers'],
+        generator=g
     )
+    
     test_loader = DataLoader(
         dataset=test_dataset,
         batch_size=train_conf['batch_size'],
@@ -54,43 +147,6 @@ def train(config_path: str):
         num_workers=train_conf['num_workers']
     )
     print(f"训练集大小: {len(train_dataset)}, 测试集大小: {len(test_dataset)}")
-    
-    # --- Calculate Class Weights (ENS) ---
-    print("Calculating class weights (Effective Number of Samples)...")
-    class_counts = {}
-    for line in train_dataset.lines:
-        try:
-            _, label = line.split('\t')
-            label = int(label)
-            class_counts[label] = class_counts.get(label, 0) + 1
-        except:
-            pass
-    
-    # Sort by key to ensure order [0, 1, 2, 3]
-    num_classes = model_conf['num_classes']
-    counts = [class_counts.get(i, 0) for i in range(num_classes)]
-    print(f"Class Counts: {counts}")
-    
-    beta = 0.9999
-    effective_num = 1.0 - np.power(beta, counts)
-    # Handle zero counts: precise arithmetic. If count is 0, effective_num is 0.
-    # To avoid division by zero (or by eps), we mask them.
-    weights = np.zeros_like(effective_num)
-    
-    # Calculate weights only for classes with samples
-    valid_classes = effective_num > 1e-6 # float precision
-    weights[valid_classes] = (1.0 - beta) / np.array(effective_num)[valid_classes]
-    
-    # Normalize (sum to 4? or sum to num_valid_classes? usually sum to num_classes)
-    if np.sum(weights) > 0:
-        weights = weights / np.sum(weights) * num_classes # Normalize so mean weight is 1.0
-    else:
-        # Fallback if no data (should not happen in real training except debug)
-        weights = np.ones(4)
-
-    
-    class_weights = torch.tensor(weights).float().to(device)
-    print(f"Class Weights (Re-enabled with Data Augmentation): {class_weights}")
 
 
     # --- 4. 构建模型 ---
@@ -167,7 +223,8 @@ def train(config_path: str):
             return loss
 
     loss_conf = train_conf.get('loss_conf', {})
-    gamma = loss_conf.get('gamma', 2.0)
+    loss_type = loss_conf.get('loss_type', 'focal')
+    gamma = loss_conf.get('gamma', 2.0) if loss_type == 'focal' else 0.0
     label_smoothing = loss_conf.get('label_smoothing', 0.1)
     pair_penalty = loss_conf.get('pair_penalty', None)
 
@@ -175,8 +232,20 @@ def train(config_path: str):
     criterion_none = FocalLoss(weight=class_weights, gamma=gamma, reduction='none', 
                                label_smoothing=label_smoothing, pair_penalty=pair_penalty)
 
+    # --- Freeze Backbone Logic ---
+    if train_conf.get('freeze_backbone', False):
+        print("\n[INFO] Freezing backbone: Only the classification head will be trained.")
+        for name, param in model.named_parameters():
+            if 'classifier' not in name:
+                param.requires_grad = False
+            else:
+                param.requires_grad = True
+
+    # Build optimizer with only trainable parameters
+    trainable_params = filter(lambda p: p.requires_grad, model.parameters())
+
     optimizer = optim.AdamW(
-        params=model.parameters(),
+        params=trainable_params,
         lr=train_conf['learning_rate'],
         weight_decay=train_conf.get('weight_decay', 1e-4)
     )
@@ -190,11 +259,12 @@ def train(config_path: str):
     # --- 6. 训练与评估循环 ---
     print("\n--- 6. 开始训练与评估 ---")
     best_accuracy = 0.0
+    best_acc_epoch = 0
+    best_f1 = 0.0
+    best_f1_epoch = 0
+    monitor_metric = train_conf.get('monitor_metric', 'f1')
     save_dir = Path(train_conf['save_model_dir'])
     save_dir.mkdir(parents=True, exist_ok=True)  # 确保保存目录存在
-    
-    # Initialize f1 for saving results later
-    f1 = 0.0
     
     # Early stopping config
     patience = 5
@@ -203,6 +273,13 @@ def train(config_path: str):
     for epoch in range(train_conf['max_epoch']):
         # --- 训练阶段 ---
         model.train()
+        
+        # If freezing backbone, keep its BN layers in eval mode
+        if train_conf.get('freeze_backbone', False):
+            for name, module in model.named_modules():
+                if 'classifier' not in name:
+                    module.eval()
+                    
         total_loss = 0
         total_correct = 0
 
@@ -241,6 +318,12 @@ def train(config_path: str):
             
             optimizer.zero_grad()
             outputs = model(inputs)
+            
+            # Logit Adjustment (Train)
+            if loss_conf.get('apply_logit_adj_in_train', False):
+                tau = loss_conf.get('logit_adj_tau', 1.0)
+                outputs = outputs + tau * log_prior
+
             
             # Calculate loss per sample using Focal Loss (which uses reduction='none' internally)
             # However, our local FocalLoss with reduction='none' could be used:
@@ -283,6 +366,12 @@ def train(config_path: str):
                 # For eval, label_a == label_b. lam == 1.0. 
                 mel_spectrogram, labels = mel_spectrogram.to(device), label_a.to(device)
                 outputs = model(mel_spectrogram)
+                
+                # Logit Adjustment (Eval)
+                if loss_conf.get('apply_logit_adj_in_eval', False):
+                    tau = loss_conf.get('logit_adj_tau', 1.0)
+                    outputs = outputs + tau * log_prior
+                    
                 _, predicted = torch.max(outputs.data, 1)
 
                 total_correct += (predicted == labels).sum().item()
@@ -305,15 +394,34 @@ def train(config_path: str):
             print("\nClassification Report:\n")
             print(classification_report(all_labels, all_preds, zero_division=0))
 
-        # --- 保存最佳模型 ---
+        # --- 保存最佳模型与记录 ---
+        # Record best Accuracy
         if eval_accuracy > best_accuracy:
             best_accuracy = eval_accuracy
-            best_model_path = save_dir / "best_model.pth"
-            torch.save(model.state_dict(), best_model_path)
-            print(f"  New best model saved to {best_model_path} with accuracy: {best_accuracy:.4f}")
-            epochs_no_improve = 0
-        else:
-            epochs_no_improve += 1
+            best_acc_epoch = epoch + 1
+            if monitor_metric == 'acc':
+                best_model_path = save_dir / "best_model.pth"
+                torch.save(model.state_dict(), best_model_path)
+                print(f"  New best model saved to {best_model_path} with Acc: {best_accuracy:.4f}")
+                epochs_no_improve = 0
+            
+        # Record best F1
+        if f1 > best_f1:
+            best_f1 = f1
+            best_f1_epoch = epoch + 1
+            if monitor_metric == 'f1':
+                best_model_path = save_dir / "best_model.pth"
+                torch.save(model.state_dict(), best_model_path)
+                print(f"  New best model saved to {best_model_path} with F1: {best_f1:.4f}")
+                epochs_no_improve = 0
+        
+        # Early Stopping Logic based on monitor metric
+        if monitor_metric == 'acc' and eval_accuracy <= best_accuracy:
+             epochs_no_improve += 1
+        elif monitor_metric == 'f1' and f1 <= best_f1:
+             epochs_no_improve += 1
+             
+        if epochs_no_improve > 0:
             print(f"  No improvement for {epochs_no_improve} epochs.")
             if epochs_no_improve >= patience:
                 print(f"\nEarly stopping triggered after {epoch + 1} epochs!")
@@ -324,12 +432,15 @@ def train(config_path: str):
         scheduler.step()
 
     print("\n--- 训练完成 ---")
-    print(f"最佳评估准确率: {best_accuracy:.4f}")
+    print(f"最佳评估准确率: {best_accuracy:.4f} (Epoch {best_acc_epoch})")
+    print(f"最佳 F1 Score: {best_f1:.4f} (Epoch {best_f1_epoch})")
     if train_conf['save_model_dir']:
         save_dir = Path(train_conf['save_model_dir'])
         with open(save_dir / "results.txt", 'w') as f:
-             f.write(f"Best Acc: {best_accuracy:.4f}\n")
-             f.write(f"F1: {f1:.4f}\n")
+             f.write(f"Best Acc: {best_accuracy:.4f} @ Epoch {best_acc_epoch}\n")
+             f.write(f"Best F1: {best_f1:.4f} @ Epoch {best_f1_epoch}\n")
+             f.write(f"Last Acc: {eval_accuracy:.4f}\n")
+             f.write(f"Last F1: {f1:.4f}\n")
              f.write(f"Params: {params}\n")
              f.write(f"FLOPs: {flops}\n")
     

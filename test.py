@@ -56,6 +56,28 @@ def test(config_path: str, model_path: str):
         num_workers=config['train_conf']['num_workers']
     )
 
+    # Calculate train prior for Logit Adjustment if needed
+    train_conf = config.get('train_conf', {})
+    loss_conf = train_conf.get('loss_conf', {})
+    has_logit_adj = loss_conf.get('logit_adjustment', False)
+    if has_logit_adj:
+        print("Calculating training priors for Logit Adjustment at test time...")
+        temp_train_dataset = AudioDataset(data_list_path=data_conf['train_list'], train=False)
+        class_counts = {}
+        for line in temp_train_dataset.lines:
+            try:
+                _, label = line.split('\t')
+                label = int(label)
+                class_counts[label] = class_counts.get(label, 0) + 1
+            except:
+                pass
+        num_classes = model_conf['num_classes']
+        counts = [class_counts.get(i, 0) for i in range(num_classes)]
+        sum_counts = sum(counts) if sum(counts) > 0 else 1
+        log_prior = torch.log(torch.tensor(counts).float() / sum_counts + 1e-8).to(device)
+    else:
+        log_prior = None
+
     print("\n3. 在测试集上进行预测")
     
     # Store results for voting
@@ -74,6 +96,12 @@ def test(config_path: str, model_path: str):
             # label = label_a.to(device) # In eval, label_a == label
             
             outputs = model(mel)
+            
+            # Application of Logit Adjustment
+            if has_logit_adj and log_prior is not None:
+                tau = loss_conf.get('logit_adj_tau', 1.0)
+                outputs = outputs + tau * log_prior
+                
             scores = torch.nn.functional.softmax(outputs, dim=1)
             _, preds = torch.max(outputs, 1)
 

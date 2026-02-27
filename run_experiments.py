@@ -3,20 +3,32 @@ import os
 import sys
 import subprocess
 from pathlib import Path
+import copy
+import re
 
 # Base Configuration Template for DeepShip
 BASE_CONFIG_TEMPLATE = {
     'train_conf': {
         'use_gpu': True,
-        'batch_size': 8, # Reduced to 16 to avoid OOM. Adjust if needed.
+        'batch_size': 16, # Reduced to 16 to avoid OOM. Adjust if needed.
         'num_workers': 4,
         'max_epoch': 50,
         'learning_rate': 0.001,
         'weight_decay': 1e-4,
+        'freeze_backbone': False, # New parameter for ablation
+        'seed': 42, # Ensure random seed reproducibility
         'save_model_dir': None,
+        'use_sampler': False,
+        'sampler_alpha': 0.5,
+        'use_class_weights': True,
+        'monitor_metric': 'f1', # acc, f1
         'loss_conf': {
+            'loss_type': 'focal', # 'ce' or 'focal'
             'gamma': 2.0,
             'label_smoothing': 0.1,
+            'apply_logit_adj_in_train': False,
+            'apply_logit_adj_in_eval': False,
+            'logit_adj_tau': 1.0,
             'pair_penalty': {
                 'use_penalty': False,
                 'weight': 2.0,
@@ -33,7 +45,7 @@ BASE_CONFIG_TEMPLATE = {
     },
     'model_conf': {
         'num_classes': 3,
-        'in_channels': 1,
+        'in_channels': 3, # Updated for log-mel + delta + delta-delta
         'width_mult': 1.0,
         'model_config': None,
         # Ablation flags
@@ -113,12 +125,49 @@ EXPERIMENTS = {
         "force_no_residual": False,
         "asymmetric": False
     },
-    "M5_MobileNetV2_CBAM_Asym": {
+    "M5_Baseline": {
         "model_config": CONFIG_CBAM_S24,
-        "force_no_residual": False,
         "asymmetric": True,
         "multiscale": True,
-        "audio_mode": False
+        "use_sampler": False,
+        "use_class_weights": False,  
+        "loss_type": "ce",           # Strict clean baseline
+        "gamma": 0.0                 # Strict fallback
+    },
+    "M5_Plus_Sampler": {
+        "model_config": CONFIG_CBAM_S24,
+        "asymmetric": True,
+        "multiscale": True,
+        "use_sampler": True,
+        "sampler_alpha": 0.5,
+        "use_class_weights": False,
+        "loss_type": "ce",
+        "gamma": 0.0
+    },
+    "M5_Plus_LogitAdj": {
+        "model_config": CONFIG_CBAM_S24,
+        "asymmetric": True,
+        "multiscale": True,
+        "use_sampler": False,
+        "use_class_weights": False,
+        "loss_type": "ce",
+        "gamma": 0.0,
+        "apply_logit_adj_in_train": True,
+        "apply_logit_adj_in_eval": True,
+        "logit_adj_tau": 1.0
+    },
+    "M5_Sampler_And_LogitAdj": {
+        "model_config": CONFIG_CBAM_S24,
+        "asymmetric": True,
+        "multiscale": True,
+        "use_sampler": True,
+        "sampler_alpha": 0.5,
+        "use_class_weights": False,
+        "loss_type": "ce",
+        "gamma": 0.0,
+        "apply_logit_adj_in_train": True,
+        "apply_logit_adj_in_eval": True,
+        "logit_adj_tau": 0.5
     },
     "M6_AudioMobileNetV2": {
         "model_config": CONFIG_FREQ_S24,
@@ -134,25 +183,33 @@ def main():
     
     # Create results file
     with open("ablation_results_summary.txt", "w") as f:
-        f.write("Experiment | Best Acc | F1 | Params | FLOPs\n")
-        f.write("-" * 60 + "\n")
+        f.write("Experiment | Best Acc | Best F1 | Sampler | Alpha | CE/FL | LA Train/Eval | Tau\n")
+        f.write("-" * 100 + "\n")
 
     for exp_name, setup in EXPERIMENTS.items():
-        if exp_name not in ["M4_MobileNetV2_CBAM", "M5_MobileNetV2_CBAM_Asym"]:
+        if exp_name not in ["M5_Baseline", "M5_Plus_Sampler", "M5_Plus_LogitAdj", "M5_Sampler_And_LogitAdj"]:
             continue
         print(f"\n{'=' * 20} Starting Experiment: {exp_name} {'=' * 20}")
 
-        current_config = BASE_CONFIG_TEMPLATE.copy()
-        current_config['model_conf'] = BASE_CONFIG_TEMPLATE['model_conf'].copy()
-        current_config['train_conf'] = BASE_CONFIG_TEMPLATE['train_conf'].copy()
-        current_config['data_conf'] = BASE_CONFIG_TEMPLATE['data_conf'].copy()
+        current_config = copy.deepcopy(BASE_CONFIG_TEMPLATE)
         
         # Apply specific settings
         current_config['model_conf']['model_config'] = setup['model_config']
         current_config['model_conf']['asymmetric'] = setup.get('asymmetric', False)
         current_config['model_conf']['multiscale'] = setup.get('multiscale', False)
-        current_config['model_conf']['force_no_residual'] = setup.get('force_no_residual', False)
-        current_config['model_conf']['audio_mode'] = setup.get('audio_mode', False)
+        
+        # Apply specific ablation parameters to train_conf
+        current_config['train_conf']['use_sampler'] = setup.get('use_sampler', False)
+        current_config['train_conf']['sampler_alpha'] = setup.get('sampler_alpha', 0.5)
+        current_config['train_conf']['use_class_weights'] = setup.get('use_class_weights', False)
+        current_config['train_conf']['loss_conf']['loss_type'] = setup.get('loss_type', 'focal')
+        current_config['train_conf']['loss_conf']['gamma'] = setup.get('gamma', 2.0)
+        
+        # Logit Adjustment controls
+        current_config['train_conf']['loss_conf']['apply_logit_adj_in_train'] = setup.get('apply_logit_adj_in_train', False)
+        current_config['train_conf']['loss_conf']['apply_logit_adj_in_eval'] = setup.get('apply_logit_adj_in_eval', False)
+        current_config['train_conf']['loss_conf']['logit_adj_tau'] = setup.get('logit_adj_tau', 1.0)
+        
         current_config['train_conf']['save_model_dir'] = f'saved_models/{exp_name}'
 
         config_path = configs_dir / f"{exp_name}_config.yml"
@@ -174,21 +231,32 @@ def main():
             subprocess.run(command, check=True)
             print(f"Experiment {exp_name} finished.")
             
-            # Read results
+            # Read results using dict-like matching instead of strict indices
             results_file = Path(f'saved_models/{exp_name}/results.txt')
             if results_file.exists():
                 with open(results_file, 'r') as rf:
                     content = rf.read()
                     print(f"Results for {exp_name}:\n{content}")
-                    # Parse for summary
-                    lines = content.strip().split('\n')
-                    acc = lines[0].split(': ')[1]
-                    f1 = lines[1].split(': ')[1] if len(lines) > 1 else "N/A"
-                    params = lines[2].split(': ')[1] if len(lines) > 2 else "N/A"
-                    flops = lines[3].split(': ')[1] if len(lines) > 3 else "N/A"
+                    
+                    # Regex matching
+                    match_best_acc = re.search(r"Best Acc:\s+([0-9.]+)", content)
+                    match_best_f1 = re.search(r"Best F1:\s+([0-9.]+)", content)
+                    
+                    acc = match_best_acc.group(1) if match_best_acc else "N/A"
+                    f1 = match_best_f1.group(1) if match_best_f1 else "N/A"
+                    
+                    # Extract hyperparameters for summary clarity
+                    sampler_str = "ON" if current_config['train_conf']['use_sampler'] else "OFF"
+                    alpha_str = str(current_config['train_conf']['sampler_alpha'])
+                    loss_str = current_config['train_conf']['loss_conf']['loss_type'].upper()
+                    
+                    la_train = "T" if current_config['train_conf']['loss_conf']['apply_logit_adj_in_train'] else "F"
+                    la_eval = "T" if current_config['train_conf']['loss_conf']['apply_logit_adj_in_eval'] else "F"
+                    la_str = f"{la_train}/{la_eval}"
+                    tau_str = str(current_config['train_conf']['loss_conf']['logit_adj_tau'])
                     
                     with open("ablation_results_summary.txt", "a") as sf:
-                        sf.write(f"{exp_name} | {acc} | {f1} | {params} | {flops}\n")
+                        sf.write(f"{exp_name} | {acc} | {f1} | {sampler_str} | {alpha_str} | {loss_str} | {la_str} | {tau_str}\n")
 
         except subprocess.CalledProcessError as e:
             print(f"Experiment {exp_name} failed: {e}")

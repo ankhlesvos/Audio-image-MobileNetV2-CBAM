@@ -86,7 +86,15 @@ def waveform_to_mel(waveform: torch.Tensor) -> torch.Tensor:
     mel_spec = mel_spectrogram_transformer(waveform)
     log_mel_spec = T.AmplitudeToDB()(mel_spec)
 
-    return log_mel_spec
+    # Calculate Deltas and Delta-Deltas
+    compute_deltas = T.ComputeDeltas()
+    delta = compute_deltas(log_mel_spec)
+    delta2 = compute_deltas(delta)
+
+    # Stack along channel dimension (dim=0): log_mel, delta, delta2
+    stacked_features = torch.cat([log_mel_spec, delta, delta2], dim=0)
+
+    return stacked_features
 
 def audio_to_mel_spectrogram(audio_path: str) -> torch.Tensor:
     """Legacy wrapper for compatibility."""
