@@ -40,8 +40,9 @@ BASE_CONFIG_TEMPLATE = {
         }
     },
     'data_conf': {
-        'train_list': 'data/train_list_5s.txt',
-        'test_list': 'data/test_list_5s.txt'
+        'train_list': 'data/train_list_5s_new.txt',  # val-split version
+        'val_list':   'data/val_list_5s.txt',         # file-level val (early stopping)
+        'test_list':  'data/test_list_5s.txt'         # frozen, never used during training
     },
     'model_conf': {
         'num_classes': 3,
@@ -144,7 +145,8 @@ EXPERIMENTS = {
         "loss_type": "ce",
         "gamma": 0.0
     },
-    "M5_Plus_LogitAdj": {
+    "M5_LA_TT": {
+        # Both train AND eval use LA — existing combined condition
         "model_config": CONFIG_CBAM_S24,
         "asymmetric": True,
         "multiscale": True,
@@ -156,18 +158,44 @@ EXPERIMENTS = {
         "apply_logit_adj_in_eval": True,
         "logit_adj_tau": 1.0
     },
-    "M5_Sampler_And_LogitAdj": {
+    "M5_LA_FT": {
+        # Only eval (inference post-processing) — train without LA
         "model_config": CONFIG_CBAM_S24,
         "asymmetric": True,
         "multiscale": True,
-        "use_sampler": True,
-        "sampler_alpha": 0.5,
+        "use_sampler": False,
+        "use_class_weights": False,
+        "loss_type": "ce",
+        "gamma": 0.0,
+        "apply_logit_adj_in_train": False,
+        "apply_logit_adj_in_eval": True,
+        "logit_adj_tau": 1.0
+    },
+    "M5_LA_TF": {
+        # Only train regularization — eval without LA (raw logits at test time)
+        "model_config": CONFIG_CBAM_S24,
+        "asymmetric": True,
+        "multiscale": True,
+        "use_sampler": False,
         "use_class_weights": False,
         "loss_type": "ce",
         "gamma": 0.0,
         "apply_logit_adj_in_train": True,
-        "apply_logit_adj_in_eval": True,
-        "logit_adj_tau": 0.5
+        "apply_logit_adj_in_eval": False,
+        "logit_adj_tau": 1.0
+    },
+    "M5_LA_FF": {
+        # No LA at all — clean CE baseline for LA ablation comparison
+        "model_config": CONFIG_CBAM_S24,
+        "asymmetric": True,
+        "multiscale": True,
+        "use_sampler": False,
+        "use_class_weights": False,
+        "loss_type": "ce",
+        "gamma": 0.0,
+        "apply_logit_adj_in_train": False,
+        "apply_logit_adj_in_eval": False,
+        "logit_adj_tau": 1.0
     },
     "M6_AudioMobileNetV2": {
         "model_config": CONFIG_FREQ_S24,
@@ -175,6 +203,49 @@ EXPERIMENTS = {
         "asymmetric": True,
         "audio_mode": True
     },
+
+    # ── tau sweep (LA T/T, LS=0.1) ────────────────────────────────────────────────
+    # Compare against M5_LA_TT (tau=1.0); lower tau → less aggressive logit shift
+    "M5_LA_TT_tau025": {
+        "model_config": CONFIG_CBAM_S24, "asymmetric": True, "multiscale": True,
+        "use_sampler": False, "use_class_weights": False,
+        "loss_type": "ce", "gamma": 0.0, "label_smoothing": 0.1,
+        "apply_logit_adj_in_train": True, "apply_logit_adj_in_eval": True,
+        "logit_adj_tau": 0.25,
+    },
+    "M5_LA_TT_tau050": {
+        "model_config": CONFIG_CBAM_S24, "asymmetric": True, "multiscale": True,
+        "use_sampler": False, "use_class_weights": False,
+        "loss_type": "ce", "gamma": 0.0, "label_smoothing": 0.1,
+        "apply_logit_adj_in_train": True, "apply_logit_adj_in_eval": True,
+        "logit_adj_tau": 0.5,
+    },
+    # M5_LA_TT is tau=1.0 (already defined above)
+    "M5_LA_TT_tau150": {
+        "model_config": CONFIG_CBAM_S24, "asymmetric": True, "multiscale": True,
+        "use_sampler": False, "use_class_weights": False,
+        "loss_type": "ce", "gamma": 0.0, "label_smoothing": 0.1,
+        "apply_logit_adj_in_train": True, "apply_logit_adj_in_eval": True,
+        "logit_adj_tau": 1.5,
+    },
+
+    # ── label_smoothing sweep (LA T/T, tau=1.0) ────────────────────────────────
+    # Isolates the smoothing × LA interaction; M5_LA_TT has ls=0.1 as anchor
+    "M5_LA_TT_ls00": {
+        "model_config": CONFIG_CBAM_S24, "asymmetric": True, "multiscale": True,
+        "use_sampler": False, "use_class_weights": False,
+        "loss_type": "ce", "gamma": 0.0, "label_smoothing": 0.0,
+        "apply_logit_adj_in_train": True, "apply_logit_adj_in_eval": True,
+        "logit_adj_tau": 1.0,
+    },
+    "M5_LA_TT_ls005": {
+        "model_config": CONFIG_CBAM_S24, "asymmetric": True, "multiscale": True,
+        "use_sampler": False, "use_class_weights": False,
+        "loss_type": "ce", "gamma": 0.0, "label_smoothing": 0.05,
+        "apply_logit_adj_in_train": True, "apply_logit_adj_in_eval": True,
+        "logit_adj_tau": 1.0,
+    },
+    # M5_LA_TT is ls=0.1 (reference, already defined above)
 }
 
 def main():
@@ -187,7 +258,27 @@ def main():
         f.write("-" * 100 + "\n")
 
     for exp_name, setup in EXPERIMENTS.items():
-        if exp_name not in ["M5_Baseline", "M5_Plus_Sampler", "M5_Plus_LogitAdj", "M5_Sampler_And_LogitAdj"]:
+        # ── Select which experiments to run ──────────────────────────────────────
+        # M1-M5: architecture ablation | M5_LA_*: logit adjustment ablation
+        run_list = [
+            "M1_BasicCNN",
+            "M2_MobileNetV2",
+            "M3_MobileNetV2_SE",
+            "M4_MobileNetV2_CBAM",
+            # ── LA 2×2 ablation ──
+            "M5_LA_FF",           # No LA — CE baseline
+            "M5_LA_FT",           # Inference-only LA
+            "M5_LA_TF",           # Training-only LA
+            "M5_LA_TT",           # Both (tau=1.0, ls=0.1)
+            # ── tau sweep ──
+            "M5_LA_TT_tau025",
+            "M5_LA_TT_tau050",
+            "M5_LA_TT_tau150",
+            # ── label_smoothing sweep ──
+            "M5_LA_TT_ls00",
+            "M5_LA_TT_ls005",
+        ]
+        if exp_name not in run_list:
             continue
         print(f"\n{'=' * 20} Starting Experiment: {exp_name} {'=' * 20}")
 
@@ -204,7 +295,10 @@ def main():
         current_config['train_conf']['use_class_weights'] = setup.get('use_class_weights', False)
         current_config['train_conf']['loss_conf']['loss_type'] = setup.get('loss_type', 'focal')
         current_config['train_conf']['loss_conf']['gamma'] = setup.get('gamma', 2.0)
-        
+        # label_smoothing is overridable per-experiment (base template default: 0.1)
+        if 'label_smoothing' in setup:
+            current_config['train_conf']['loss_conf']['label_smoothing'] = setup['label_smoothing']
+
         # Logit Adjustment controls
         current_config['train_conf']['loss_conf']['apply_logit_adj_in_train'] = setup.get('apply_logit_adj_in_train', False)
         current_config['train_conf']['loss_conf']['apply_logit_adj_in_eval'] = setup.get('apply_logit_adj_in_eval', False)
@@ -238,12 +332,16 @@ def main():
                     content = rf.read()
                     print(f"Results for {exp_name}:\n{content}")
                     
-                    # Regex matching
-                    match_best_acc = re.search(r"Best Acc:\s+([0-9.]+)", content)
-                    match_best_f1 = re.search(r"Best F1:\s+([0-9.]+)", content)
-                    
-                    acc = match_best_acc.group(1) if match_best_acc else "N/A"
-                    f1 = match_best_f1.group(1) if match_best_f1 else "N/A"
+                    # Regex matching — updated keys for new results.txt format
+                    match_best_acc = re.search(r"Best Val Acc:\s+([0-9.]+)", content)
+                    match_best_f1  = re.search(r"Best Val F1:\s+([0-9.]+)", content)
+                    match_test_acc = re.search(r"Test File Acc:\s+([0-9.]+)", content)
+                    match_test_f1  = re.search(r"Test File F1:\s+([0-9.]+)", content)
+
+                    val_acc  = match_best_acc.group(1) if match_best_acc else "N/A"
+                    val_f1   = match_best_f1.group(1)  if match_best_f1  else "N/A"
+                    test_acc = match_test_acc.group(1)  if match_test_acc  else "N/A"
+                    test_f1  = match_test_f1.group(1)   if match_test_f1   else "N/A"
                     
                     # Extract hyperparameters for summary clarity
                     sampler_str = "ON" if current_config['train_conf']['use_sampler'] else "OFF"
@@ -251,12 +349,16 @@ def main():
                     loss_str = current_config['train_conf']['loss_conf']['loss_type'].upper()
                     
                     la_train = "T" if current_config['train_conf']['loss_conf']['apply_logit_adj_in_train'] else "F"
-                    la_eval = "T" if current_config['train_conf']['loss_conf']['apply_logit_adj_in_eval'] else "F"
-                    la_str = f"{la_train}/{la_eval}"
-                    tau_str = str(current_config['train_conf']['loss_conf']['logit_adj_tau'])
-                    
+                    la_eval  = "T" if current_config['train_conf']['loss_conf']['apply_logit_adj_in_eval'] else "F"
+                    la_str   = f"{la_train}/{la_eval}"
+                    tau_str  = str(current_config['train_conf']['loss_conf']['logit_adj_tau'])
+
                     with open("ablation_results_summary.txt", "a") as sf:
-                        sf.write(f"{exp_name} | {acc} | {f1} | {sampler_str} | {alpha_str} | {loss_str} | {la_str} | {tau_str}\n")
+                        sf.write(
+                            f"{exp_name} | ValAcc={val_acc} | ValF1={val_f1} | "
+                            f"TestAcc={test_acc} | TestF1={test_f1} | "
+                            f"{sampler_str} | {alpha_str} | {loss_str} | {la_str} | {tau_str}\n"
+                        )
 
         except subprocess.CalledProcessError as e:
             print(f"Experiment {exp_name} failed: {e}")

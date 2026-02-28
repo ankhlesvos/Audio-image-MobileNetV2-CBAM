@@ -9,6 +9,7 @@ import numpy as np
 from tqdm import tqdm
 import yaml
 import os
+import re
 import random
 from pathlib import Path
 
@@ -51,7 +52,17 @@ def train(config_path: str):
     # --- 3. 准备数据 ---
     print("\n--- 3. 准备数据 ---")
     train_dataset = AudioDataset(data_list_path=data_conf['train_list'], train=True)
-    test_dataset = AudioDataset(data_list_path=data_conf['test_list'], train=False)
+    test_dataset  = AudioDataset(data_list_path=data_conf['test_list'],  train=False)
+
+    # Val dataset: used for early stopping / best model selection
+    val_list_path = data_conf.get('val_list', None)
+    if val_list_path:
+        val_dataset = AudioDataset(data_list_path=val_list_path, train=False)
+        print(f"验证集 (val) 使用: {val_list_path}")
+    else:
+        # Backward-compat: fall back to test set (old behaviour)
+        print("[WARN] No val_list specified — using test set for early stopping (not recommended).")
+        val_dataset = test_dataset
 
     # --- Calculate Class Weights (ENS) & Prior ---
     print("Calculating class weights (Effective Number of Samples) and Priors...")
@@ -140,13 +151,19 @@ def train(config_path: str):
         generator=g
     )
     
+    val_loader = DataLoader(
+        dataset=val_dataset,
+        batch_size=train_conf['batch_size'],
+        shuffle=False,
+        num_workers=train_conf['num_workers']
+    )
     test_loader = DataLoader(
         dataset=test_dataset,
         batch_size=train_conf['batch_size'],
         shuffle=False,
         num_workers=train_conf['num_workers']
     )
-    print(f"训练集大小: {len(train_dataset)}, 测试集大小: {len(test_dataset)}")
+    print(f"训练集大小: {len(train_dataset)}, 验证集大小: {len(val_dataset)}, 测试集大小: {len(test_dataset)}")
 
 
     # --- 4. 构建模型 ---
@@ -270,6 +287,27 @@ def train(config_path: str):
     patience = 5
     epochs_no_improve = 0
 
+    # ===== [TEMP] Sampler Verification — DELETE AFTER USE =====
+    def verify_sampler_distribution(loader, num_cls, true_counts):
+        from collections import Counter
+        sampled_counts = Counter()
+        for _, lab_a, lab_b, lam in loader:
+            # lab_a 是 Mixup 前的原始主标签，用它来统计 sampler 行为
+            for l in lab_a.tolist():
+                sampled_counts[l] += 1
+        print("\n[SAMPLER VERIFY] ===========================")
+        print(f"  {'Class':<8} {'True Count':>12} {'Sampled Count':>14} {'Ratio':>8}")
+        print(f"  {'-'*45}")
+        for c in range(num_cls):
+            tc = true_counts[c]
+            sc = sampled_counts.get(c, 0)
+            ratio = sc / tc if tc > 0 else float('inf')
+            print(f"  {c:<8} {tc:>12} {sc:>14} {ratio:>8.3f}")
+        print("[SAMPLER VERIFY] ===========================\n")
+
+    verify_sampler_distribution(train_loader, num_classes, counts)
+    # ===== [TEMP END] =====
+
     for epoch in range(train_conf['max_epoch']):
         # --- 训练阶段 ---
         model.train()
@@ -356,45 +394,107 @@ def train(config_path: str):
         avg_train_loss = total_loss / len(train_loader)
         train_accuracy = total_correct / len(train_dataset)
 
-        # --- 评估阶段 ---
+        # ─── Val Evaluation (used for early stopping / best model selection) ───
+        def run_file_level_eval(loader, dataset_ref, desc_tag):
+            """File-level majority-vote evaluation on the given loader.
+            Returns: (file_accuracy, file_precision, file_recall, file_f1,
+                      seg_accuracy, seg_f1, file_gt, file_pred_vote)
+            """
+            _correct = 0
+            _all_seg_preds, _all_seg_labels = [], []
+            _file_preds: dict = {}
+            _file_labels_map: dict = {}
+            _gidx = 0
+
+            with torch.no_grad():
+                for mel_spec, la, lb, _lam in tqdm(loader, desc=desc_tag):
+                    mel_spec = mel_spec.to(device)
+                    _labels  = la.to(device)
+                    _out     = model(mel_spec)
+
+                    # Logit Adjustment (Eval)
+                    if loss_conf.get('apply_logit_adj_in_eval', False):
+                        tau = loss_conf.get('logit_adj_tau', 1.0)
+                        _out = _out + tau * log_prior
+
+                    _, _pred = torch.max(_out.data, 1)
+                    _correct += (_pred == _labels).sum().item()
+                    _all_seg_preds.extend(_pred.cpu().numpy())
+                    _all_seg_labels.extend(_labels.cpu().numpy())
+
+                    _bpreds = _pred.cpu().numpy()
+                    for _i in range(mel_spec.size(0)):
+                        if _gidx >= len(dataset_ref.lines):
+                            break
+                        _line = dataset_ref.lines[_gidx]
+                        try:
+                            _path, _str_lab = _line.split('\t')
+                        except ValueError:
+                            _gidx += 1
+                            continue
+                        # Full-path file ID (matches create_val_split.py logic)
+                        _fid_match = re.match(r'^(.+)_seg\d+\.wav$', _path)
+                        _fid = _fid_match.group(1) if _fid_match else _path
+                        if _fid not in _file_preds:
+                            _file_preds[_fid] = []
+                            _file_labels_map[_fid] = int(_str_lab)
+                        _file_preds[_fid].append(int(_bpreds[_i]))
+                        _gidx += 1
+
+            _seg_acc = _correct / max(len(dataset_ref), 1)
+            _seg_f1  = f1_score(_all_seg_labels, _all_seg_preds, average='macro', zero_division=0)
+
+            _fgt, _fvote = [], []
+            for _fid, _pl in _file_preds.items():
+                _ca = np.bincount(_pl, minlength=num_classes)
+                _fvote.append(int(np.argmax(_ca)))
+                _fgt.append(_file_labels_map[_fid])
+
+            if len(_fgt) > 0:
+                _facc = sum(p == g for p, g in zip(_fvote, _fgt)) / len(_fgt)
+                _fp   = precision_score(_fgt, _fvote, average='macro', zero_division=0)
+                _fr   = recall_score(_fgt, _fvote, average='macro', zero_division=0)
+                _ff1  = f1_score(_fgt, _fvote, average='macro', zero_division=0)
+            else:
+                _facc = _seg_acc
+                _fp = _fr = _ff1 = _seg_f1
+
+            # ── Diagnostic: unique file count & per-class breakdown ──────────
+            from collections import Counter as _Counter
+            _per_cls_files = _Counter(_file_labels_map[fid] for fid in _file_preds)
+            _n_files = len(_file_preds)
+            _n_segs  = len(_all_seg_preds)
+            print(f"    [{desc_tag}] Aggregated {_n_files} unique files "
+                  f"({_n_segs} segs) | per-class files: "
+                  f"{dict(sorted(_per_cls_files.items()))}")
+            if _n_files == 0:
+                print(f"    [{desc_tag}] !! WARNING: 0 files aggregated — check regex / dataset paths !!")
+            # ────────────────────────────────────────────────────────────────
+
+            return _facc, _fp, _fr, _ff1, _seg_acc, _seg_f1, _fgt, _fvote
+
+
         model.eval()
-        total_correct = 0
-        all_preds = []
-        all_labels = []
-        with torch.no_grad():
-            for mel_spectrogram, label_a, label_b, lam in tqdm(test_loader, desc=f"Epoch {epoch + 1}/{train_conf['max_epoch']} [Eval]"):
-                # For eval, label_a == label_b. lam == 1.0. 
-                mel_spectrogram, labels = mel_spectrogram.to(device), label_a.to(device)
-                outputs = model(mel_spectrogram)
-                
-                # Logit Adjustment (Eval)
-                if loss_conf.get('apply_logit_adj_in_eval', False):
-                    tau = loss_conf.get('logit_adj_tau', 1.0)
-                    outputs = outputs + tau * log_prior
-                    
-                _, predicted = torch.max(outputs.data, 1)
+        val_tag = f"Epoch {epoch + 1}/{train_conf['max_epoch']} [Val]"
+        (file_accuracy, file_precision, file_recall, f1,
+         seg_accuracy, seg_f1, val_gt, val_pred_vote) = run_file_level_eval(
+             val_loader, val_dataset, val_tag)
 
-                total_correct += (predicted == labels).sum().item()
-                
-                all_preds.extend(predicted.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
+        # eval_accuracy kept for compatibility with Acc monitor mode
+        eval_accuracy = file_accuracy
 
-        eval_accuracy = total_correct / len(test_dataset)
-        
-        # Calculate P, R, F1
-        precision = precision_score(all_labels, all_preds, average='macro', zero_division=0)
-        recall = recall_score(all_labels, all_preds, average='macro', zero_division=0)
-        f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
-
-        print(f"Epoch {epoch + 1}/{train_conf['max_epoch']}: \n"
+        print(f"Epoch {epoch + 1}/{train_conf['max_epoch']}:\n"
               f"  Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f}\n"
-              f"  Eval Acc: {eval_accuracy:.4f} | P: {precision:.4f} | R: {recall:.4f} | F1: {f1:.4f}")
-              
+              f"  [Val-Seg]   Acc: {seg_accuracy:.4f} | F1: {seg_f1:.4f}\n"
+              f"  [Val-File]  Acc: {file_accuracy:.4f} | P: {file_precision:.4f} | R: {file_recall:.4f} | F1: {f1:.4f}  <-- model selection")
+
         if (epoch + 1) % 5 == 0 or epoch == train_conf['max_epoch'] - 1:
-            print("\nClassification Report:\n")
-            print(classification_report(all_labels, all_preds, zero_division=0))
+            print("\nClassification Report (Val File-Level):\n")
+            print(classification_report(val_gt, val_pred_vote, zero_division=0))
 
         # --- 保存最佳模型与记录 ---
+        new_best_this_epoch = False
+
         # Record best Accuracy
         if eval_accuracy > best_accuracy:
             best_accuracy = eval_accuracy
@@ -402,9 +502,9 @@ def train(config_path: str):
             if monitor_metric == 'acc':
                 best_model_path = save_dir / "best_model.pth"
                 torch.save(model.state_dict(), best_model_path)
-                print(f"  New best model saved to {best_model_path} with Acc: {best_accuracy:.4f}")
-                epochs_no_improve = 0
-            
+                print(f"  New best model saved to {best_model_path} with Val-Acc: {best_accuracy:.4f}")
+                new_best_this_epoch = True
+
         # Record best F1
         if f1 > best_f1:
             best_f1 = f1
@@ -412,39 +512,59 @@ def train(config_path: str):
             if monitor_metric == 'f1':
                 best_model_path = save_dir / "best_model.pth"
                 torch.save(model.state_dict(), best_model_path)
-                print(f"  New best model saved to {best_model_path} with F1: {best_f1:.4f}")
-                epochs_no_improve = 0
-        
-        # Early Stopping Logic based on monitor metric
-        if monitor_metric == 'acc' and eval_accuracy <= best_accuracy:
-             epochs_no_improve += 1
-        elif monitor_metric == 'f1' and f1 <= best_f1:
-             epochs_no_improve += 1
-             
+                print(f"  New best model saved to {best_model_path} with Val-F1: {best_f1:.4f}")
+                new_best_this_epoch = True
+
+        # Early Stopping: reset on improvement, increment otherwise
+        if new_best_this_epoch:
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+
         if epochs_no_improve > 0:
             print(f"  No improvement for {epochs_no_improve} epochs.")
-            if epochs_no_improve >= patience:
-                print(f"\nEarly stopping triggered after {epoch + 1} epochs!")
-                break
+        if epochs_no_improve >= patience:
+            print(f"\nEarly stopping triggered after {epoch + 1} epochs!")
+            break
 
         # 更新学习率
         # Update learning rate
         scheduler.step()
 
     print("\n--- 训练完成 ---")
-    print(f"最佳评估准确率: {best_accuracy:.4f} (Epoch {best_acc_epoch})")
-    print(f"最佳 F1 Score: {best_f1:.4f} (Epoch {best_f1_epoch})")
+    print(f"最佳 Val 准确率: {best_accuracy:.4f} (Epoch {best_acc_epoch})")
+    print(f"最佳 Val F1 Score: {best_f1:.4f} (Epoch {best_f1_epoch})")
+
+    # ─── Final Test Set Evaluation (run once after training) ──────────────────
+    print("\n--- 最终 Test Set 评估 ---")
+    model.eval()
+    # Load best model before final eval
+    if (save_dir / "best_model.pth").exists():
+        model.load_state_dict(torch.load(save_dir / "best_model.pth", map_location=device))
+        print(f"Loaded best model from {save_dir / 'best_model.pth'}")
+
+    (test_file_acc, test_file_prec, test_file_rec, test_f1,
+     test_seg_acc, test_seg_f1, test_gt, test_pred) = run_file_level_eval(
+         test_loader, test_dataset, "[Test]")
+
+    print(f"  [Test-Seg]   Acc: {test_seg_acc:.4f} | F1: {test_seg_f1:.4f}")
+    print(f"  [Test-File]  Acc: {test_file_acc:.4f} | P: {test_file_prec:.4f} | R: {test_file_rec:.4f} | F1: {test_f1:.4f}")
+    print("\nClassification Report (Test File-Level):\n")
+    print(classification_report(test_gt, test_pred, zero_division=0))
+
     if train_conf['save_model_dir']:
         save_dir = Path(train_conf['save_model_dir'])
         with open(save_dir / "results.txt", 'w') as f:
-             f.write(f"Best Acc: {best_accuracy:.4f} @ Epoch {best_acc_epoch}\n")
-             f.write(f"Best F1: {best_f1:.4f} @ Epoch {best_f1_epoch}\n")
-             f.write(f"Last Acc: {eval_accuracy:.4f}\n")
-             f.write(f"Last F1: {f1:.4f}\n")
-             f.write(f"Params: {params}\n")
-             f.write(f"FLOPs: {flops}\n")
-    
-    return best_accuracy
+            f.write(f"Best Val Acc: {best_accuracy:.4f} @ Epoch {best_acc_epoch}\n")
+            f.write(f"Best Val F1:  {best_f1:.4f} @ Epoch {best_f1_epoch}\n")
+            f.write(f"Test File Acc: {test_file_acc:.4f}\n")
+            f.write(f"Test File F1:  {test_f1:.4f}\n")
+            f.write(f"Test Seg  Acc: {test_seg_acc:.4f}\n")
+            f.write(f"Test Seg  F1:  {test_seg_f1:.4f}\n")
+            f.write(f"Params: {params}\n")
+            f.write(f"FLOPs: {flops}\n")
+
+    return test_file_acc
 
 
 if __name__ == '__main__':

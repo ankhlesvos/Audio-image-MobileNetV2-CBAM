@@ -1,3 +1,7 @@
 Experiment | Best Acc | Best F1 | Sampler | Alpha | CE/FL | LA Train/Eval | Tau
 ----------------------------------------------------------------------------------------------------
-M5_Baseline | 0.7391 | 0.6822 | OFF | 0.5 | CE | F/F | 1.0
+M1_BasicCNN | 0.6364 | 0.5963 | OFF | 0.5 | FOCAL | F/F | 1.0
+M2_MobileNetV2 | 0.6364 | 0.5963 | OFF | 0.5 | FOCAL | F/F | 1.0
+M3_MobileNetV2_SE | 0.5455 | 0.5315 | OFF | 0.5 | FOCAL | F/F | 1.0
+M4_MobileNetV2_CBAM | 0.4545 | 0.4497 | OFF | 0.5 | FOCAL | F/F | 1.0
+M5_Plus_LogitAdj | 0.7273 | 0.7090 | OFF | 0.5 | CE | T/T | 1.0

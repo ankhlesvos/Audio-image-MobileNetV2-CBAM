@@ -124,13 +124,15 @@ def test(config_path: str, model_path: str):
                 true_label = int(str_label)
                 
                 # Identify "Original File" ID
+                # Actual naming convention from prepare_deepship_data_5s.py:
+                #   {recording_id}_seg{offset}.wav  e.g. 41_seg0.wav, 41_seg160000.wav
+                # We strip the "_seg<digits>.wav" suffix to recover the recording_id.
                 filename = os.path.basename(path)
-                # Heuristic: file_1.wav, file_2.wav -> file
-                match = re.match(r'(.+)_\d+\.wav$', filename)
+                match = re.match(r'(.+)_seg\d+\.wav$', filename)
                 if match:
-                    file_id = match.group(1)
+                    file_id = match.group(1)  # e.g. "41"
                 else:
-                    file_id = filename # Fallback
+                    file_id = filename  # Fallback: treat each segment as its own file
                 
                 if file_id not in file_predictions:
                     file_predictions[file_id] = []
