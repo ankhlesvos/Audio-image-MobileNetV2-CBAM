@@ -37,6 +37,15 @@ from run_experiments import (
     EXPERIMENTS,
 )
 
+try:
+    from google.colab import drive
+    drive.mount('/content/drive')
+    # 定义云盘上的项目根目录（建议修改成你喜欢的文件夹名）
+    DRIVE_BASE = Path("/content/drive/MyDrive/KFold_Project")
+except ImportWarning:
+    # 如果在本地运行，则退回到当前目录
+    DRIVE_BASE = Path(".")
+
 KFOLD_DIR      = Path("data/kfold")
 RESULTS_CSV    = Path("kfold_results_summary.csv")
 AGGREGATE_TXT  = Path("kfold_aggregate.txt")
@@ -175,7 +184,11 @@ def main():
     seeds = args.seeds
     exps  = args.exps
 
+    # CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
+    # 确保云盘目录存在
+    DRIVE_BASE.mkdir(parents=True, exist_ok=True)
     CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
+    (DRIVE_BASE / "saved_models").mkdir(parents=True, exist_ok=True)
 
     # ── Verify fold files exist ────────────────────────────────────────────────
     for fold in range(K):
