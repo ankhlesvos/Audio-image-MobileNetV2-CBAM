@@ -44,11 +44,56 @@ CONFIGS_DIR    = Path("configs/kfold")
 
 # ── Which experiments to run (override via --exps) ────────────────────────────
 DEFAULT_EXPS = [
-    "M5_LA_FF",
-    "M5_LA_FT",
-    "M5_LA_TF",
-    "M5_LA_TT",
+    "Ablation_LR",
+    "Ablation_LR_Sampler",
+    "Ablation_LR_Sampler_TopK_Vote",
+    "Ablation_LR_Sampler_Entropy_Vote"
 ]
+
+# Base dict for these ablations (derived from M5_LA_TF)
+# Baseline M5_LA_TF: Train True, Eval False
+# We build upon this configuration progressively.
+ABLATION_BASE_SETUP = {
+    "model_config": CONFIG_CBAM_S24,
+    "asymmetric": True,
+    "multiscale": True,
+    "use_sampler": False,
+    "use_class_weights": False,
+    "loss_type": "ce",
+    "gamma": 0.0,
+    "apply_logit_adj_in_train": True,
+    "apply_logit_adj_in_eval": False,
+    "logit_adj_tau": 1.0,
+    "patience": 10
+}
+
+EXPERIMENTS.update({
+    "Ablation_LR": {
+        **ABLATION_BASE_SETUP,
+        "learning_rate": 3e-4,  # Assuming default was 1e-3, test with 3e-4 (cosine warmup handling might require deeper train.py edits if standard cosine annealing is not enough)
+    },
+    "Ablation_LR_Sampler": {
+        **ABLATION_BASE_SETUP,
+        "learning_rate": 3e-4,
+        "use_sampler": True,
+        "sampler_alpha": 0.5,
+    },
+    "Ablation_LR_Sampler_TopK_Vote": {
+        **ABLATION_BASE_SETUP,
+        "learning_rate": 3e-4,
+        "use_sampler": True,
+        "sampler_alpha": 0.5,
+        "file_voting_strategy": "top_k",
+        "file_voting_top_k": 3,
+    },
+    "Ablation_LR_Sampler_Entropy_Vote": {
+        **ABLATION_BASE_SETUP,
+        "learning_rate": 3e-4,
+        "use_sampler": True,
+        "sampler_alpha": 0.5,
+        "file_voting_strategy": "entropy",
+    }
+})
 
 DEFAULT_SEEDS  = [42, 43, 44]
 DEFAULT_K      = 5
@@ -62,6 +107,7 @@ def make_config(setup: dict, train_list: str, val_list: str,
     cfg["train_conf"]["seed"]       = seed
     cfg["train_conf"]["max_epoch"]  = max_epoch
     cfg["train_conf"]["save_model_dir"] = save_dir
+    cfg["train_conf"]["patience"]   = setup.get("patience", 10)
 
     # Model settings
     cfg["model_conf"]["model_config"]       = setup["model_config"]
@@ -69,11 +115,19 @@ def make_config(setup: dict, train_list: str, val_list: str,
     cfg["model_conf"]["multiscale"]         = setup.get("multiscale", False)
     cfg["model_conf"]["force_no_residual"]  = setup.get("force_no_residual", False)
     cfg["model_conf"]["audio_mode"]         = setup.get("audio_mode", False)
+    if "in_channels" in setup:
+        cfg["model_conf"]["in_channels"] = setup["in_channels"]
 
     # Training settings
     cfg["train_conf"]["use_sampler"]        = setup.get("use_sampler", False)
     cfg["train_conf"]["sampler_alpha"]      = setup.get("sampler_alpha", 0.5)
     cfg["train_conf"]["use_class_weights"]  = setup.get("use_class_weights", False)
+    if "learning_rate" in setup:
+        cfg["train_conf"]["learning_rate"] = setup["learning_rate"]
+    if "file_voting_strategy" in setup:
+        cfg["train_conf"]["file_voting_strategy"] = setup["file_voting_strategy"]
+    if "file_voting_top_k" in setup:
+        cfg["train_conf"]["file_voting_top_k"] = setup["file_voting_top_k"]
 
     # Loss settings
     lc = cfg["train_conf"]["loss_conf"]

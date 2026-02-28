@@ -22,6 +22,7 @@ BASE_CONFIG_TEMPLATE = {
         'sampler_alpha': 0.5,
         'use_class_weights': True,
         'monitor_metric': 'f1', # acc, f1
+        'patience': 10, # default patience
         'loss_conf': {
             'loss_type': 'focal', # 'ce' or 'focal'
             'gamma': 2.0,
@@ -201,7 +202,8 @@ EXPERIMENTS = {
         "model_config": CONFIG_FREQ_S24,
         "force_no_residual": False,
         "asymmetric": True,
-        "audio_mode": True
+        "audio_mode": True,
+        "in_channels": 1
     },
 
     # ── tau sweep (LA T/T, LS=0.1) ────────────────────────────────────────────────
@@ -288,6 +290,8 @@ def main():
         current_config['model_conf']['model_config'] = setup['model_config']
         current_config['model_conf']['asymmetric'] = setup.get('asymmetric', False)
         current_config['model_conf']['multiscale'] = setup.get('multiscale', False)
+        if 'in_channels' in setup:
+            current_config['model_conf']['in_channels'] = setup['in_channels']
         
         # Apply specific ablation parameters to train_conf
         current_config['train_conf']['use_sampler'] = setup.get('use_sampler', False)

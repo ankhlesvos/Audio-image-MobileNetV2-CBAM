@@ -93,6 +93,8 @@ def test(config_path: str, model_path: str):
     with torch.no_grad():
         for mel, label_a, label_b, lam in tqdm(test_loader, desc="Testing"):
             mel = mel.to(device)
+            if model_conf.get('in_channels', 3) == 1 and mel.size(1) == 3:
+                mel = mel[:, 0:1, :, :]
             # label = label_a.to(device) # In eval, label_a == label
             
             outputs = model(mel)

@@ -284,8 +284,10 @@ def train(config_path: str):
     save_dir.mkdir(parents=True, exist_ok=True)  # 确保保存目录存在
     
     # Early stopping config
-    patience = 5
+    patience = train_conf.get('patience', 10)
     epochs_no_improve = 0
+    top_k_models = []  # List of tuples: (metric_value, model_path)
+    top_k = 3
 
     # ===== [TEMP] Sampler Verification — DELETE AFTER USE =====
     def verify_sampler_distribution(loader, num_cls, true_counts):
@@ -325,6 +327,8 @@ def train(config_path: str):
         train_pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{train_conf['max_epoch']} [Train]")
         for inputs, label_a, label_b, lam in train_pbar:
             inputs = inputs.to(device)
+            if model_conf.get('in_channels', 3) == 1 and inputs.size(1) == 3:
+                inputs = inputs[:, 0:1, :, :]
             label_a = label_a.to(device)
             label_b = label_b.to(device)
             # lam is a tensor batch or scalar? 
@@ -396,19 +400,22 @@ def train(config_path: str):
 
         # ─── Val Evaluation (used for early stopping / best model selection) ───
         def run_file_level_eval(loader, dataset_ref, desc_tag):
-            """File-level majority-vote evaluation on the given loader.
+            """File-level evaluation on the given loader using specified voting strategy.
             Returns: (file_accuracy, file_precision, file_recall, file_f1,
                       seg_accuracy, seg_f1, file_gt, file_pred_vote)
             """
             _correct = 0
             _all_seg_preds, _all_seg_labels = [], []
-            _file_preds: dict = {}
+            _file_preds: dict = {}  # {fid: [pred_class, ...]}
+            _file_scores: dict = {} # {fid: [[score_c0, score_c1, ...], ...]}
             _file_labels_map: dict = {}
             _gidx = 0
 
             with torch.no_grad():
                 for mel_spec, la, lb, _lam in tqdm(loader, desc=desc_tag):
                     mel_spec = mel_spec.to(device)
+                    if model_conf.get('in_channels', 3) == 1 and mel_spec.size(1) == 3:
+                        mel_spec = mel_spec[:, 0:1, :, :]
                     _labels  = la.to(device)
                     _out     = model(mel_spec)
 
@@ -423,6 +430,7 @@ def train(config_path: str):
                     _all_seg_labels.extend(_labels.cpu().numpy())
 
                     _bpreds = _pred.cpu().numpy()
+                    _bscores = torch.softmax(_out, dim=1).cpu().numpy()
                     for _i in range(mel_spec.size(0)):
                         if _gidx >= len(dataset_ref.lines):
                             break
@@ -437,17 +445,46 @@ def train(config_path: str):
                         _fid = _fid_match.group(1) if _fid_match else _path
                         if _fid not in _file_preds:
                             _file_preds[_fid] = []
+                            _file_scores[_fid] = []
                             _file_labels_map[_fid] = int(_str_lab)
                         _file_preds[_fid].append(int(_bpreds[_i]))
+                        _file_scores[_fid].append(_bscores[_i])
                         _gidx += 1
 
             _seg_acc = _correct / max(len(dataset_ref), 1)
             _seg_f1  = f1_score(_all_seg_labels, _all_seg_preds, average='macro', zero_division=0)
 
             _fgt, _fvote = [], []
+            voting_strategy = train_conf.get('file_voting_strategy', 'majority')
+            top_k_vote = train_conf.get('file_voting_top_k', 3)
+
             for _fid, _pl in _file_preds.items():
-                _ca = np.bincount(_pl, minlength=num_classes)
-                _fvote.append(int(np.argmax(_ca)))
+                _sl = np.array(_file_scores[_fid]) # shape: (num_segs, num_classes)
+                
+                if voting_strategy == 'entropy':
+                    # Calculate entropy for each segment prediction
+                    # _sl is probabilities since we used softmax
+                    eps = 1e-9
+                    entropies = -np.sum(_sl * np.log(_sl + eps), axis=1)
+                    # Lower entropy means higher confidence. 
+                    # Weight = 1 / (entropy + eps). We sum weighted probabilities per class.
+                    weights = 1.0 / (entropies + eps)
+                    weighted_scores = np.average(_sl, axis=0, weights=weights)
+                    _winner = int(np.argmax(weighted_scores))
+                    _ca = -1 # not used
+                elif voting_strategy == 'top_k':
+                    # Sort segments by confidence (max prob) descending
+                    max_probs = np.max(_sl, axis=1)
+                    top_indices = np.argsort(max_probs)[-top_k_vote:]
+                    top_preds = np.array(_pl)[top_indices]
+                    _ca = np.bincount(top_preds, minlength=num_classes)
+                    _winner = int(np.argmax(_ca))
+                else:
+                    # Default majority voting
+                    _ca = np.bincount(_pl, minlength=num_classes)
+                    _winner = int(np.argmax(_ca))
+
+                _fvote.append(_winner)
                 _fgt.append(_file_labels_map[_fid])
 
             if len(_fgt) > 0:
@@ -494,26 +531,31 @@ def train(config_path: str):
 
         # --- 保存最佳模型与记录 ---
         new_best_this_epoch = False
-
-        # Record best Accuracy
+        current_metric = eval_accuracy if monitor_metric == 'acc' else f1
+        
+        # Check if current_metric is in top-K
+        if len(top_k_models) < top_k or current_metric > top_k_models[0][0]:
+            best_model_path = save_dir / f"best_model_epoch_{epoch+1}.pth"
+            torch.save(model.state_dict(), best_model_path)
+            print(f"  New top-{top_k} model saved to {best_model_path} with Val-{monitor_metric.upper()}: {current_metric:.4f}")
+            new_best_this_epoch = True
+            
+            top_k_models.append((current_metric, best_model_path))
+            top_k_models.sort(key=lambda x: x[0])  # Sort ascending, worst is at index 0, best is at index -1
+            
+            if len(top_k_models) > top_k:
+                removed_metric, removed_path = top_k_models.pop(0)
+                if removed_path.exists():
+                    removed_path.unlink()
+        
+        # Keep track of absolute best for displaying stats
         if eval_accuracy > best_accuracy:
             best_accuracy = eval_accuracy
             best_acc_epoch = epoch + 1
-            if monitor_metric == 'acc':
-                best_model_path = save_dir / "best_model.pth"
-                torch.save(model.state_dict(), best_model_path)
-                print(f"  New best model saved to {best_model_path} with Val-Acc: {best_accuracy:.4f}")
-                new_best_this_epoch = True
-
-        # Record best F1
+        
         if f1 > best_f1:
             best_f1 = f1
             best_f1_epoch = epoch + 1
-            if monitor_metric == 'f1':
-                best_model_path = save_dir / "best_model.pth"
-                torch.save(model.state_dict(), best_model_path)
-                print(f"  New best model saved to {best_model_path} with Val-F1: {best_f1:.4f}")
-                new_best_this_epoch = True
 
         # Early Stopping: reset on improvement, increment otherwise
         if new_best_this_epoch:
@@ -538,8 +580,13 @@ def train(config_path: str):
     # ─── Final Test Set Evaluation (run once after training) ──────────────────
     print("\n--- 最终 Test Set 评估 ---")
     model.eval()
-    # Load best model before final eval
-    if (save_dir / "best_model.pth").exists():
+    # Load absolute best model before final eval
+    if top_k_models and top_k_models[-1][1].exists():
+        best_model_path = top_k_models[-1][1]
+        model.load_state_dict(torch.load(best_model_path, map_location=device))
+        print(f"Loaded best model from {best_model_path}")
+    elif (save_dir / "best_model.pth").exists():
+        # Fallback for old codebase structure
         model.load_state_dict(torch.load(save_dir / "best_model.pth", map_location=device))
         print(f"Loaded best model from {save_dir / 'best_model.pth'}")
 
