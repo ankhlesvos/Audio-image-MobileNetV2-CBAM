@@ -1,0 +1,20 @@
+Experiment | Data Version | Seed | Val F1 | Test File Acc | Test File F1
+--------------------------------------------------------------------------------
+B0_TopKVote | ds5s_v0 | 42 | 0.5556 | 0.6154 | 0.6053
+B0_TopKVote | ds5s_v0 | 43 | 0.6556 | 0.6154 | 0.6204
+B0_TopKVote | ds5s_v0 | 44 | 0.5926 | 0.6154 | 0.6111
+D1_TopKVote | ds5s_ol060_070_060 | 42 | 0.7556 | 0.2308 | 0.1778
+D1_TopKVote | ds5s_ol060_070_060 | 43 | 0.8296 | 0.6923 | 0.6556
+D1_TopKVote | ds5s_ol060_070_060 | 44 | 0.7407 | 0.6923 | 0.6515
+D4_TopKVote | ds5s_no_undersample | 42 | 0.5652 | 0.5385 | 0.5238
+D4_TopKVote | ds5s_no_undersample | 43 | 0.7579 | 0.5385 | 0.5476
+D4_TopKVote | ds5s_no_undersample | 44 | 0.5253 | 0.5385 | 0.5390
+D5_TopKVote | ds5s_cap20perfile | 42 | 0.8056 | 0.1538 | 0.1026
+D5_TopKVote | ds5s_cap20perfile | 43 | 0.8056 | 0.5385 | 0.5278
+D5_TopKVote | ds5s_cap20perfile | 44 | 0.9048 | 0.5385 | 0.5152
+D6_TopKVote | ds5s_vad003 | 42 | 0.5556 | 0.6154 | 0.6053
+D6_TopKVote | ds5s_vad003 | 43 | 0.6556 | 0.6154 | 0.6204
+D6_TopKVote | ds5s_vad003 | 44 | 0.5926 | 0.6154 | 0.6111
+D7_TopKVote | ds5s_vad008 | 42 | 0.5556 | 0.6154 | 0.6053
+D7_TopKVote | ds5s_vad008 | 43 | 0.6556 | 0.6154 | 0.6204
+D7_TopKVote | ds5s_vad008 | 44 | 0.5926 | 0.6154 | 0.6111

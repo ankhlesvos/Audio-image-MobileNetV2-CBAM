@@ -1,17 +1,3 @@
-"""
-prepare_deepship_data_5s.py
-----------------------------
-Rebuilds the dataset with:
-  - 5-second segments (160000 samples @ 32kHz)
-  - Merged class mapping:
-      Cargo       -> 0  (merged with Tug)
-      Tug         -> 0  (merged with Cargo)
-      Passengership -> 1
-      Tanker      -> 2
-  - Saved to data/deepship_processed_5s/{0,1,2}/
-  - List files: data/train_list_5s.txt, data/test_list_5s.txt
-"""
-
 import os
 import glob
 import random
@@ -20,32 +6,17 @@ import soundfile as sf
 import numpy as np
 from tqdm import tqdm
 from pathlib import Path
+import collections
+import statistics
+import argparse
 
-# --- Configuration ---
+# --- Base Configuration ---
 SOURCE_DIR = 'DeepShip-main'
-TARGET_DIR = 'data/deepship_processed_5s'
-TRAIN_LIST_PATH = 'data/train_list_5s.txt'
-TEST_LIST_PATH = 'data/test_list_5s.txt'
 TARGET_SR = 32000
-SEGMENT_DURATION = 5        # Seconds  <--- 5 seconds as requested
-SEGMENT_SAMPLES = TARGET_SR * SEGMENT_DURATION   # 160000
+SEGMENT_DURATION = 5  # Seconds
+SEGMENT_SAMPLES = TARGET_SR * SEGMENT_DURATION
 
-# VAD & Cleanup Config
-RMS_THRESHOLD = 0.005   # Filter out segments with RMS below this
-
-# Adaptive Overlap Configuration for training data.
-# Higher overlap => more segments => more training data.
-# Target: >= 1000 train segments per class.
-# With 5s segments at 32kHz: stride = SEGMENT_SAMPLES * (1 - overlap)
-# overlap 0.8 -> stride = 32000 samples = 1s  (very fine-grained sampling)
-# overlap 0.9 -> stride = 16000 samples = 0.5s (very aggressive, for small datasets)
-CLASS_OVERLAP_RATIOS = {
-    0: 0.85,  # Cargo+Tug
-    1: 0.96,  # Passengership - Extreme overlap to squeeze max data
-    2: 0.94,  # Tanker
-}
-
-# New 3-class mapping: Cargo+Tug -> 0, Passengership -> 1, Tanker -> 2
+# Class map
 CLASS_MAP = {
     'Cargo':         0,
     'Tug':           0,
@@ -53,11 +24,9 @@ CLASS_MAP = {
     'Tanker':        2,
 }
 
-
 def calculate_rms(waveform):
     """Calculates RMS amplitude of a tensor."""
     return torch.sqrt(torch.mean(waveform ** 2)).item()
-
 
 def peak_normalize(waveform):
     """Peak normalizes the waveform to -1.0 to 1.0."""
@@ -66,22 +35,17 @@ def peak_normalize(waveform):
         return waveform / max_val
     return waveform
 
-
-def process_file(file_path, target_dir, class_id, is_train=True):
+def process_file(file_path, target_dir, class_id, is_train=True, overlap_ratios=None, rms_threshold=0.005):
     """
     Reads audio, normalizes, inspects for signal (VAD), and slices into 5s segments.
-    Training data uses overlapping slices; Test data does not.
     """
     try:
         wav_numpy, sr = sf.read(file_path)
         waveform = torch.from_numpy(wav_numpy).float()
-
-        # Ensure (channels, time)
         if waveform.ndim == 1:
             waveform = waveform.unsqueeze(0)
         else:
             waveform = waveform.t()
-
     except Exception as e:
         print(f"Error loading {file_path}: {e}")
         return []
@@ -90,7 +54,7 @@ def process_file(file_path, target_dir, class_id, is_train=True):
     if waveform.shape[0] > 1:
         waveform = torch.mean(waveform, dim=0, keepdim=True)
 
-    # Resample if necessary
+    # Resample
     if sr != TARGET_SR:
         import torchaudio.transforms as T
         resampler = T.Resample(orig_freq=sr, new_freq=TARGET_SR)
@@ -98,12 +62,11 @@ def process_file(file_path, target_dir, class_id, is_train=True):
 
     # Peak Normalize
     waveform = peak_normalize(waveform)
-
     num_samples = waveform.shape[1]
 
     # Determine stride
-    if is_train:
-        overlap = CLASS_OVERLAP_RATIOS.get(class_id, 0.5)
+    if is_train and overlap_ratios is not None:
+        overlap = overlap_ratios.get(class_id, 0.5)
         stride = int(SEGMENT_SAMPLES * (1 - overlap))
     else:
         stride = SEGMENT_SAMPLES   # No overlap for test
@@ -111,96 +74,76 @@ def process_file(file_path, target_dir, class_id, is_train=True):
     saved_segments = []
     filename = Path(file_path).stem
 
-    # Slicing loop
     for start in range(0, num_samples - SEGMENT_SAMPLES + 1, stride):
         end = start + SEGMENT_SAMPLES
         segment = waveform[:, start:end]
 
         # VAD Check
         rms = calculate_rms(segment)
-        if rms < RMS_THRESHOLD:
-            continue  # Skip noise/silence
+        if rms < rms_threshold:
+            continue
 
-        # Save segment
         save_name = f"{filename}_seg{start}.wav"
         save_path = os.path.join(target_dir, str(class_id), save_name)
-
+        
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
-        segment_numpy = segment.squeeze().numpy()
-        sf.write(save_path, segment_numpy, TARGET_SR)
+        sf.write(save_path, segment.squeeze().numpy(), TARGET_SR)
         saved_segments.append((save_path, class_id))
 
     return saved_segments
 
-
 def main():
-    if not os.path.exists(SOURCE_DIR):
-        print(f"Directory '{SOURCE_DIR}' not found. Attempting to download and extract from GitHub...")
-        import urllib.request
-        import zipfile
-        
-        zip_url = "https://github.com/irfankamboh/DeepShip/archive/refs/heads/main.zip"
-        zip_path = "DeepShip-main.zip"
-        
-        if not os.path.exists(zip_path):
-            print(f"Downloading {zip_url} to {zip_path}... (This might take a while)")
-            try:
-                class DownloadProgressBar(tqdm):
-                    def update_to(self, b=1, bsize=1, tsize=None):
-                        if tsize is not None:
-                            self.total = tsize
-                        self.update(b * bsize - self.n)
-                
-                with DownloadProgressBar(unit='B', unit_scale=True, miniters=1, desc="DeepShip Dataset") as t:
-                    urllib.request.urlretrieve(zip_url, filename=zip_path, reporthook=t.update_to)
-            except Exception as e:
-                print(f"Failed to download ZIP: {e}")
-                print("Trying git clone fallback...")
-                os.system(f"git clone https://github.com/irfankamboh/DeepShip.git {SOURCE_DIR}")
-        
-        if os.path.exists(zip_path) and not os.path.exists(SOURCE_DIR):
-            print(f"Extracting {zip_path} to current directory...")
-            try:
-                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                    zip_ref.extractall(".")
-                print("Extraction complete.")
-            except Exception as e:
-                print(f"Failed to extract ZIP: {e}")
-                
-        if not os.path.exists(SOURCE_DIR):
-            print(f"Error: Required source directory '{SOURCE_DIR}' could not be created/found.")
-            return
+    parser = argparse.ArgumentParser(description="DeepShip 5s Data Preparation (Ablations)")
+    parser.add_argument("--version_name", type=str, default="ds5s_v0", help="Version name for outputs")
+    parser.add_argument("--overlap", type=float, nargs=3, default=[0.85, 0.96, 0.94], help="Overlap ratios for classes 0, 1, 2")
+    parser.add_argument("--no_undersample", action="store_true", help="Disable segment-level undersampling")
+    parser.add_argument("--max_segs_per_file", type=int, default=0, help="Cap maximum segments per raw file (0 = no limit)")
+    parser.add_argument("--rms_threshold", type=float, default=0.005, help="VAD RMS threshold")
+    parser.add_argument("--seed", type=int, default=42, help="Seed for split consistency")
+    args = parser.parse_args()
 
-    # Create target directories (3 classes: 0, 1, 2)
+    # Apply configuration
+    TARGET_DIR = f'data/{args.version_name}'
+    TRAIN_LIST_PATH = f'data/train_list_{args.version_name}.txt'
+    TEST_LIST_PATH = f'data/test_list_{args.version_name}.txt'
+    
+    CLASS_OVERLAP_RATIOS = {0: args.overlap[0], 1: args.overlap[1], 2: args.overlap[2]}
+
+    print(f"=== Running Data Prep: {args.version_name} ===")
+    print(f"  Target Dir    : {TARGET_DIR}")
+    print(f"  Overlap       : {CLASS_OVERLAP_RATIOS}")
+    print(f"  Undersampling : {'Disabled' if args.no_undersample else 'Enabled'}")
+    print(f"  Max Segs/file : {args.max_segs_per_file if args.max_segs_per_file > 0 else 'Unlimited'}")
+    print(f"  VAD RMS Thresh: {args.rms_threshold}")
+    print(f"==========================================")
+
+    # Validate deepship folder
+    if not os.path.exists(SOURCE_DIR):
+        print(f"Error: Required source directory '{SOURCE_DIR}' not found.")
+        return
+
     for class_id in [0, 1, 2]:
         os.makedirs(os.path.join(TARGET_DIR, str(class_id)), exist_ok=True)
 
     all_files = []
-    print("Scanning files...")
     for class_name, class_id in CLASS_MAP.items():
         class_dir = os.path.join(SOURCE_DIR, class_name)
-        if not os.path.isdir(class_dir):
-            print(f"Warning: Class directory '{class_dir}' not found.")
-            continue
+        if os.path.isdir(class_dir):
+            files = glob.glob(os.path.join(class_dir, '**', '*.wav'), recursive=True)
+            for f in files:
+                all_files.append((f, class_id))
 
-        files = glob.glob(os.path.join(class_dir, '**', '*.wav'), recursive=True)
-        print(f"  Found {len(files)} files for '{class_name}' -> merged class {class_id}")
-        for f in files:
-            all_files.append((f, class_id))
-
-    # Stratified Split by merged class id
-    random.seed(42)
-    files_by_class = {}
+    # Stratified Split
+    random.seed(args.seed)
+    files_by_class = collections.defaultdict(list)
     for f, cid in all_files:
-        if cid not in files_by_class:
-            files_by_class[cid] = []
         files_by_class[cid].append((f, cid))
 
     train_files_source = []
     test_files_source = []
+    
+    source_file_counts = { 'train': {0:0, 1:0, 2:0}, 'test': {0:0, 1:0, 2:0} }
 
-    print("\nSplitting source files (Stratified, 80/20):")
     for cid in sorted(files_by_class.keys()):
         files = files_by_class[cid]
         random.shuffle(files)
@@ -209,89 +152,104 @@ def main():
 
         train_files_source.extend(files[:n_train])
         test_files_source.extend(files[n_train:])
-
-        print(f"  Class {cid}: {n_total} source files -> Train {n_train}, Test {n_total - n_train}")
+        source_file_counts['train'][cid] = n_train
+        source_file_counts['test'][cid] = n_total - n_train
 
     random.shuffle(train_files_source)
     random.shuffle(test_files_source)
 
-    test_counts = {0: 0, 1: 0, 2: 0}
+    # --- TRAIN GENERATION ---
+    class_segments_train = collections.defaultdict(list)
+    segments_per_file_train = {}
 
-    # --- TRAIN: keep ALL segments, no undersampling ---
-    # Passengership has the least audio data (~0.64h); undersampling would waste
-    # the other classes. Instead keep everything and use class-weighted loss in
-    # train.py to handle the natural imbalance.
-    print(f"\nProcessing Train Files (With Adaptive Overlap & VAD, 5s segments)...")
-    print(f"  Overlap Ratios: {CLASS_OVERLAP_RATIOS}")
+    for file_path, class_id in tqdm(train_files_source, desc="Train Files"):
+        segments = process_file(
+            file_path, TARGET_DIR, class_id, 
+            is_train=True, 
+            overlap_ratios=CLASS_OVERLAP_RATIOS, 
+            rms_threshold=args.rms_threshold
+        )
+        
+        # Max Segs Per File Cap (D5)
+        if args.max_segs_per_file > 0 and len(segments) > args.max_segs_per_file:
+            segments = random.sample(segments, args.max_segs_per_file)
 
-    class_segments = {0: [], 1: [], 2: []}
-
-    for file_path, class_id in tqdm(train_files_source):
-        segments = process_file(file_path, TARGET_DIR, class_id, is_train=True)
+        segments_per_file_train[file_path] = len(segments)
         for seg_path, cid in segments:
-            class_segments[cid].append(f"{seg_path}\t{cid}\n")
+            class_segments_train[cid].append(f"{seg_path}\t{cid}\n")
 
-    raw_counts = {cid: len(lines) for cid, lines in class_segments.items()}
-    print(f"Raw segment counts before balancing: {raw_counts}")
+    raw_counts = {cid: len(lines) for cid, lines in class_segments_train.items()}
     
-    # NEW CODE: Undersampling to balance dataset
-    min_count = min(raw_counts.values())
-    print(f"Undersampling all classes to min = {min_count} segments (balanced)")
-    
-    for cid in class_segments:
-        if len(class_segments[cid]) > min_count:
-            class_segments[cid] = random.sample(class_segments[cid], min_count)
+    # Segment-level Undersampling
+    if not args.no_undersample and len(raw_counts) > 0:
+        min_count = min(raw_counts.values())
+        print(f"\nUndersampling ALL groups down to min count: {min_count}")
+        for cid in class_segments_train:
+            if len(class_segments_train[cid]) > min_count:
+                class_segments_train[cid] = random.sample(class_segments_train[cid], min_count)
+    else:
+        print("\nUndersampling skipped or non-applicable.")
 
-    # Shuffle and write all segments
+    # Write Train File
     all_train_lines = []
-    for cid in sorted(class_segments.keys()):
-        all_train_lines.extend(class_segments[cid])
+    for cid in class_segments_train:
+        all_train_lines.extend(class_segments_train[cid])
     random.shuffle(all_train_lines)
 
     with open(TRAIN_LIST_PATH, 'w') as f_out:
         f_out.writelines(all_train_lines)
 
-    train_counts = {cid: len(lines) for cid, lines in class_segments.items()}
+    train_counts = {cid: len(lines) for cid, lines in class_segments_train.items()}
 
-    # --- TEST: no balancing applied ---
-    print(f"\nProcessing Test Files (No Overlap, With VAD, 5s segments)...")
+    # --- TEST GENERATION ---
+    test_counts = {0: 0, 1: 0, 2: 0}
+    segments_per_file_test = {}
+
     with open(TEST_LIST_PATH, 'w') as f_out:
-        for file_path, class_id in tqdm(test_files_source):
-            segments = process_file(file_path, TARGET_DIR, class_id, is_train=False)
+        for file_path, class_id in tqdm(test_files_source, desc="Test Files"):
+            segments = process_file(
+                file_path, TARGET_DIR, class_id, 
+                is_train=False, 
+                rms_threshold=args.rms_threshold
+            )
+            segments_per_file_test[file_path] = len(segments)
             for seg_path, cid in segments:
                 f_out.write(f"{seg_path}\t{cid}\n")
                 test_counts[cid] += 1
 
+    # --- SANITY CHECKS ---
     print("\n" + "="*55)
-    print("Data preparation complete (5s segments, ALL data kept).")
-    print("Class mapping: Cargo+Tug -> 0, Passengership -> 1, Tanker -> 2")
+    print("SANITY CHECK & DATA DISTRIBUTION")
     print("="*55)
+    print(f"1. Source File Counts (Before Slicing):")
+    print(f"   Train : {source_file_counts['train']}")
+    print(f"   Test  : {source_file_counts['test']}")
+    
+    def print_dist(name, stat_dict):
+        vals = list(stat_dict.values())
+        if vals:
+            print(f"   {name:<6} -> Min: {min(vals):>3}, Median: {statistics.median(vals):>5.1f}, Max: {max(vals):>4}")
+    
+    print("\n2. Segment Counts Per File:")
+    print_dist("Train", segments_per_file_train)
+    print_dist("Test", segments_per_file_test)
+    
+    print("\n3. Class Distribution (Train Segments):")
     total_train = sum(train_counts.values())
-    total_test  = sum(test_counts.values())
-    print(f"\nSegment Statistics:")
-    print(f"  Train (all data): {train_counts}  (Total: {total_train})")
-    print(f"  Test  (natural):  {test_counts}   (Total: {total_test})")
+    for cid in sorted(train_counts.keys()):
+        pct = (train_counts[cid] / total_train * 100) if total_train > 0 else 0
+        print(f"   Class {cid}: {train_counts[cid]:>5} ({pct:.1f}%)")
+        
+    print("\n4. Current Final Class Weights (for CrossEntropyLoss if needed):")
+    counts_tensor = torch.tensor([train_counts.get(i, 0) for i in range(3)], dtype=torch.float)
+    if counts_tensor.min() > 0:
+        weights = counts_tensor.sum() / (len(counts_tensor) * counts_tensor)
+        w_str = ", ".join(f"{w:.4f}" for w in weights.tolist())
+        print(f"   class_weights = torch.tensor([{w_str}])")
 
-    print("\nClass Distribution (Train):")
-    for cid, count in sorted(train_counts.items()):
-        pct = count / total_train * 100 if total_train > 0 else 0
-        print(f"  Class {cid}: {count:>5} ({pct:.1f}%)")
-
-    # Print class weights for use in train.py CrossEntropyLoss(weight=...)
-    import torch
-    counts_tensor = torch.tensor([train_counts[i] for i in range(3)], dtype=torch.float)
-    weights = counts_tensor.sum() / (3 * counts_tensor)
-    print(f"\n[ACTION REQUIRED] Add class weights to CrossEntropyLoss in train.py:")
-    w_str = ", ".join(f"{w:.4f}" for w in weights.tolist())
-    print(f"  class_weights = torch.tensor([{w_str}])")
-    print(f"  loss_fn = nn.CrossEntropyLoss(weight=class_weights.to(device))")
-
-    print(f"\nList files saved:")
-    print(f"  Train: {TRAIN_LIST_PATH}")
-    print(f"  Test:  {TEST_LIST_PATH}")
-    print(f"  Segments saved to: {TARGET_DIR}/")
-
-
+    print("\nList files saved to:")
+    print(f"   Train: {TRAIN_LIST_PATH}")
+    print(f"   Test:  {TEST_LIST_PATH}")
 
 if __name__ == '__main__':
     main()

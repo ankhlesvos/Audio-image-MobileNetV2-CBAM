@@ -37,12 +37,13 @@ def main():
     parser.add_argument("--k",      type=int, default=5)
     parser.add_argument("--seed",   type=int, default=42)
     parser.add_argument("--source", default=DEFAULT_SOURCE)
+    parser.add_argument("--out_dir", default=KFOLD_DIR, help="Output directory for folds")
     args = parser.parse_args()
 
     random.seed(args.seed)
     K = args.k
 
-    os.makedirs(KFOLD_DIR, exist_ok=True)
+    os.makedirs(args.out_dir, exist_ok=True)
 
     # ── 1. Parse source into {file_id: (label, [lines])} ──────────────────────
     with open(args.source, encoding="utf-8") as f:
@@ -96,8 +97,8 @@ def main():
         # Shuffle train lines for better DataLoader batching
         random.shuffle(train_lines_out)
 
-        val_path   = os.path.join(KFOLD_DIR, f"fold{fold}_val.txt")
-        train_path = os.path.join(KFOLD_DIR, f"fold{fold}_train.txt")
+        val_path   = os.path.join(args.out_dir, f"fold{fold}_val.txt")
+        train_path = os.path.join(args.out_dir, f"fold{fold}_train.txt")
 
         with open(val_path, "w", encoding="utf-8") as vf:
             vf.write("\n".join(val_lines_out) + "\n")
@@ -114,7 +115,7 @@ def main():
         overlap = set(val_fids) & set(train_fids)
         assert not overlap, f"BUG: fold {fold} has overlap: {overlap}"
 
-    print(f"\n✓ All {K} folds written to {KFOLD_DIR}/  (no val/train overlap in any fold)")
+    print(f"\n✓ All {K} folds written to {args.out_dir}/  (no val/train overlap in any fold)")
     print(f"\nNote: to use in training, point data_conf.train_list → fold{{i}}_train.txt")
     print(f"      and data_conf.val_list → fold{{i}}_val.txt")
 

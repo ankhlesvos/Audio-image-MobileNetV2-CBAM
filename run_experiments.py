@@ -10,7 +10,7 @@ import re
 BASE_CONFIG_TEMPLATE = {
     'train_conf': {
         'use_gpu': True,
-        'batch_size': 16, # Reduced to 16 to avoid OOM. Adjust if needed.
+        'batch_size': 32, # Reduced to 16 to avoid OOM. Adjust if needed.
         'num_workers': 4,
         'max_epoch': 50,
         'learning_rate': 0.001,
