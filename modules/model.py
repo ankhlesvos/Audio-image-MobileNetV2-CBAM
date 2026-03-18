@@ -9,6 +9,12 @@ try:
 except ImportError:
     profile = None
 
+try:
+    from torchvision.models import mobilenet_v2, MobileNet_V2_Weights
+    _HAS_TORCHVISION = True
+except ImportError:
+    _HAS_TORCHVISION = False
+
 class SELayer(nn.Module):
     def __init__(self, channel, reduction=16):
         super(SELayer, self).__init__()
@@ -197,12 +203,14 @@ class InvertedResidual(nn.Module):
 
 class MyNet(nn.Module):
     def __init__(self, num_classes=1000, model_config=None, width_mult=1.0, in_channels=1,
-                 asymmetric=False, multiscale=False, force_no_residual=False, audio_mode=False):
+                 asymmetric=False, multiscale=False, force_no_residual=False, audio_mode=False,
+                 use_imagenet_pretrain=False, pretrain_mode='backbone_only'):
         super(MyNet, self).__init__()
         self.asymmetric = asymmetric
         self.multiscale = multiscale
         self.force_no_residual = force_no_residual
         self.audio_mode = audio_mode
+        self.in_channels = in_channels
 
         if model_config is None:
             model_config = [
@@ -259,12 +267,64 @@ class MyNet(nn.Module):
             nn.Linear(self.last_channel, num_classes),
         )
 
+        # Cache for feature distillation (populated by get_features / forward)
+        self._last_features: torch.Tensor | None = None
+
+        # Load ImageNet pretrained weights if requested
+        if use_imagenet_pretrain and in_channels == 3:
+            self._load_imagenet_pretrain(pretrain_mode)
+
     def forward(self, x):
         x = self.features(x)
         x = self.pool(x)
         x = torch.flatten(x, 1)
+        # Cache features for distillation (before classifier)
+        self._last_features = x
         x = self.classifier(x)
         return x
+
+    def get_features(self) -> torch.Tensor:
+        """Returns the 1280-dim feature vector from the last forward pass
+        (after global avg pool, before classifier). Used for feature distillation."""
+        if self._last_features is None:
+            raise RuntimeError("get_features() called before forward(). Run forward first.")
+        return self._last_features
+
+    def _load_imagenet_pretrain(self, mode: str = 'backbone_only'):
+        """Load MobileNetV2 ImageNet pretrained weights into matching layers.
+
+        Since the input is 3-channel (Log-Mel + Δ + ΔΔ), the first conv layer's
+        weights (3→32) are structurally compatible with ImageNet RGB and can be
+        transferred directly.
+
+        Args:
+            mode: 'backbone_only' loads only feature layers;
+                  'full' also loads classifier (only if num_classes matches 1000).
+        """
+        if not _HAS_TORCHVISION:
+            print("[WARN] torchvision not available — skipping ImageNet pretrain.")
+            return
+
+        print("[INFO] Loading ImageNet pretrained MobileNetV2 weights...")
+        pretrained = mobilenet_v2(weights=MobileNet_V2_Weights.IMAGENET1K_V1)
+        pretrained_dict = pretrained.state_dict()
+        model_dict = self.state_dict()
+
+        loaded, skipped = 0, 0
+        for name, param in pretrained_dict.items():
+            # Map torchvision names to our names
+            # torchvision: features.0.0.weight → our: features.0.0.weight (same structure)
+            if name in model_dict and model_dict[name].shape == param.shape:
+                if mode == 'backbone_only' and 'classifier' in name:
+                    skipped += 1
+                    continue
+                model_dict[name] = param
+                loaded += 1
+            else:
+                skipped += 1
+
+        self.load_state_dict(model_dict, strict=False)
+        print(f"[INFO] ImageNet pretrain: loaded {loaded} params, skipped {skipped} (shape mismatch or excluded).")
 
     def profile_model(self, input_size=(1, 80, 301)):
         if profile is None:

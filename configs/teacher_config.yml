@@ -1,0 +1,39 @@
+# configs/teacher_config.yml
+# Configuration for AST teacher model training (Phase 1 of Knowledge Distillation)
+
+teacher_conf:
+  pretrained_name: "MIT/ast-finetuned-audioset-10-10-0.4593"
+  num_classes: 3
+  freeze_encoder_epochs: 5  # freeze AST encoder for first N epochs, then unfreeze
+
+train_conf:
+  use_gpu: True
+  batch_size: 16            # smaller batch for large Transformer
+  num_workers: 4
+  max_epoch: 50
+  learning_rate: 5.0e-5     # lower LR for Transformer fine-tuning
+  weight_decay: 1.0e-2      # stronger regularization for Transformer
+  seed: 42
+  save_model_dir: 'saved_models/teacher_ast/'
+  patience: 10
+  monitor_metric: 'f1'
+  use_sampler: false
+  use_class_weights: true
+  loss_conf:
+    loss_type: 'focal'
+    gamma: 2.0
+    label_smoothing: 0.1
+    apply_logit_adj_in_train: false
+    apply_logit_adj_in_eval: false
+    logit_adj_tau: 1.0
+    pair_penalty:
+      use_penalty: false
+
+data_conf:
+  train_list: 'data/train_list_5s_new.txt'
+  val_list: 'data/val_list_5s.txt'
+  test_list: 'data/test_list_5s.txt'
+
+model_conf:
+  num_classes: 3
+  in_channels: 3   # dataset outputs 3ch; teacher extracts ch0 internally

@@ -16,6 +16,10 @@ from pathlib import Path
 from dataset import AudioDataset
 from modules.model import MyNet
 
+# Knowledge Distillation imports (lazy — only used when kd_mode is True)
+# from modules.teacher_model import ASTTeacherModel
+# from modules.distillation import CombinedKDLoss
+
 
 def train(config_path: str):
     """
@@ -178,7 +182,9 @@ def train(config_path: str):
         asymmetric=model_conf.get('asymmetric', False),
         multiscale=model_conf.get('multiscale', False),
         force_no_residual=model_conf.get('force_no_residual', False),
-        audio_mode=model_conf.get('audio_mode', False)
+        audio_mode=model_conf.get('audio_mode', False),
+        use_imagenet_pretrain=model_conf.get('use_imagenet_pretrain', False),
+        pretrain_mode=model_conf.get('pretrain_mode', 'backbone_only'),
     )
     model.to(device)
     print("模型结构:")
@@ -272,6 +278,63 @@ def train(config_path: str):
         T_max=train_conf['max_epoch'],
         eta_min=0
     )
+
+    # --- Knowledge Distillation Setup ---
+    kd_mode = train_conf.get('kd_mode', False)
+    teacher_model = None
+    kd_loss_fn = None
+
+    if kd_mode:
+        from modules.teacher_model import ASTTeacherModel
+        from modules.distillation import CombinedKDLoss
+
+        print("\n--- Knowledge Distillation Mode ENABLED ---")
+        teacher_checkpoint = train_conf.get('kd_teacher_checkpoint', '')
+        kd_alpha = train_conf.get('kd_alpha', 0.5)
+        kd_temperature = train_conf.get('kd_temperature', 4.0)
+        kd_feature_distill = train_conf.get('kd_feature_distill', False)
+        kd_feature_beta = train_conf.get('kd_feature_beta', 1.0)
+
+        # Load teacher model
+        teacher_conf = config.get('teacher_conf', {})
+        teacher_model = ASTTeacherModel(
+            num_classes=model_conf['num_classes'],
+            pretrained_name=teacher_conf.get('pretrained_name',
+                                             'MIT/ast-finetuned-audioset-10-10-0.4593'),
+        )
+
+        if teacher_checkpoint and os.path.exists(teacher_checkpoint):
+            state_dict = torch.load(teacher_checkpoint, map_location=device)
+            # Filter thop keys if present
+            clean_dict = {k: v for k, v in state_dict.items()
+                          if 'total_ops' not in k and 'total_params' not in k}
+            teacher_model.load_state_dict(clean_dict)
+            print(f"  Teacher loaded from: {teacher_checkpoint}")
+        else:
+            print(f"  [WARN] Teacher checkpoint not found: {teacher_checkpoint}")
+            print(f"         Using untrained teacher — KD loss will be random!")
+
+        teacher_model.to(device)
+        teacher_model.eval()  # Teacher is ALWAYS in eval mode
+        for p in teacher_model.parameters():
+            p.requires_grad = False  # Teacher does NOT participate in backprop
+
+        t_params = sum(p.numel() for p in teacher_model.parameters())
+        print(f"  Teacher params: {t_params / 1e6:.2f}M (frozen)")
+
+        # Build KD loss
+        kd_loss_fn = CombinedKDLoss(
+            temperature=kd_temperature,
+            alpha=kd_alpha,
+            beta=kd_feature_beta if kd_feature_distill else 0.0,
+            student_dim=model.last_channel,  # 1280
+            teacher_dim=teacher_model.hidden_size,  # 768
+        ).to(device)
+
+        print(f"  KD Config: alpha={kd_alpha}, T={kd_temperature}, "
+              f"feature_distill={kd_feature_distill}, beta={kd_feature_beta}")
+    else:
+        print("\n--- Knowledge Distillation Mode DISABLED (baseline) ---")
 
     # --- 6. 训练与评估循环 ---
     print("\n--- 6. 开始训练与评估 ---")
@@ -374,8 +437,25 @@ def train(config_path: str):
             loss_a = criterion_none(outputs, label_a)
             loss_b = criterion_none(outputs, label_b)
             
-            loss = loss_a * lam + loss_b * (1 - lam)
-            loss = loss.mean()
+            hard_loss = (loss_a * lam + loss_b * (1 - lam)).mean()
+
+            # Knowledge Distillation: combine hard loss with soft teacher targets
+            if kd_mode and teacher_model is not None:
+                with torch.no_grad():
+                    teacher_logits = teacher_model(inputs)
+                    teacher_features = teacher_model.get_features() if train_conf.get('kd_feature_distill', False) else None
+
+                student_features = model.get_features() if train_conf.get('kd_feature_distill', False) else None
+
+                loss = kd_loss_fn(
+                    hard_loss=hard_loss,
+                    student_logits=outputs,
+                    teacher_logits=teacher_logits,
+                    student_features=student_features,
+                    teacher_features=teacher_features,
+                )
+            else:
+                loss = hard_loss
             
             loss.backward()
             optimizer.step()
