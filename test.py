@@ -17,7 +17,10 @@ from dataset import AudioDataset
 from torch.utils.data import DataLoader
 
 
-def test(config_path: str, model_path: str):
+def test(config_path: str, model_path: str,
+         use_teacher: bool = False,
+         teacher_num_mel_bins: int = 160,
+         teacher_max_length: int = 157):
     #加载配置与模型
     print("1. 加载配置与模型")
     with open(config_path, 'r', encoding='utf-8') as f:
@@ -27,21 +30,33 @@ def test(config_path: str, model_path: str):
     model_conf = config['model_conf']
     data_conf = config['data_conf']
 
-    model = MyNet(
-        num_classes=model_conf['num_classes'],
-        in_channels=model_conf.get('in_channels', 3),
-        model_config=model_conf.get('model_config'),
-        width_mult=model_conf.get('width_mult', 1.0),
-        asymmetric=model_conf.get('asymmetric', False),
-        multiscale=model_conf.get('multiscale', False),
-        force_no_residual=model_conf.get('force_no_residual', False),
-        audio_mode=model_conf.get('audio_mode', False)
-    )
+    if use_teacher:
+        from modules.teacher_model import ASTTeacherModel
+        teacher_conf = config.get('teacher_conf', {})
+        model = ASTTeacherModel(
+            num_classes=model_conf['num_classes'],
+            pretrained_name=teacher_conf.get(
+                'pretrained_name', 'MIT/ast-finetuned-audioset-10-10-0.4593'),
+            num_mel_bins=teacher_num_mel_bins,
+            max_length=teacher_max_length,
+        )
+        print(f"[Teacher mode] ASTTeacherModel (mel={teacher_num_mel_bins}, T={teacher_max_length})")
+    else:
+        model = MyNet(
+            num_classes=model_conf['num_classes'],
+            in_channels=model_conf.get('in_channels', 3),
+            model_config=model_conf.get('model_config'),
+            width_mult=model_conf.get('width_mult', 1.0),
+            asymmetric=model_conf.get('asymmetric', False),
+            multiscale=model_conf.get('multiscale', False),
+            force_no_residual=model_conf.get('force_no_residual', False),
+            audio_mode=model_conf.get('audio_mode', False)
+        )
 
     state_dict = torch.load(model_path, map_location=device)
     # Filter out 'total_ops' and 'total_params' added by thop
     clean_state_dict = {k: v for k, v in state_dict.items() if "total_ops" not in k and "total_params" not in k}
-    model.load_state_dict(clean_state_dict)
+    model.load_state_dict(clean_state_dict, strict=False)
     model.to(device)
     model.eval()
     print(f"模型 {model_path} 加载成功，并设置为评估模式。")
@@ -213,6 +228,15 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--config', required=True, help='Path to the configuration file used for training.')
     parser.add_argument('-m', '--model', required=True, help='Path to the saved best_model.pth file.')
+    parser.add_argument('--teacher', action='store_true',
+                        help='Load model as ASTTeacherModel instead of MyNet.')
+    parser.add_argument('--teacher_num_mel_bins', type=int, default=160,
+                        help='Mel bins used when training the teacher (default: 160).')
+    parser.add_argument('--teacher_max_length', type=int, default=157,
+                        help='Time frames used when training the teacher (default: 157).')
     args = parser.parse_args()
 
-    test(args.config, args.model)
+    test(args.config, args.model,
+         use_teacher=args.teacher,
+         teacher_num_mel_bins=args.teacher_num_mel_bins,
+         teacher_max_length=args.teacher_max_length)

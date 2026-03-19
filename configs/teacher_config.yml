@@ -4,18 +4,18 @@
 teacher_conf:
   pretrained_name: "MIT/ast-finetuned-audioset-10-10-0.4593"
   num_classes: 3
-  freeze_encoder_epochs: 5  # freeze AST encoder for first N epochs, then unfreeze
+  freeze_encoder_epochs: 0  # freeze AST encoder for first N epochs, then unfreeze
 
 train_conf:
   use_gpu: True
-  batch_size: 16            # smaller batch for large Transformer
+  batch_size: 64            # smaller batch for large Transformer
   num_workers: 4
-  max_epoch: 50
-  learning_rate: 5.0e-5     # lower LR for Transformer fine-tuning
+  max_epoch: 80
+  learning_rate: 1.0e-5     # lower LR for Transformer fine-tuning
   weight_decay: 1.0e-2      # stronger regularization for Transformer
   seed: 42
   save_model_dir: 'saved_models/teacher_ast/'
-  patience: 10
+  patience: 15
   monitor_metric: 'f1'
   use_sampler: false
   use_class_weights: true
@@ -23,7 +23,7 @@ train_conf:
     loss_type: 'focal'
     gamma: 2.0
     label_smoothing: 0.1
-    apply_logit_adj_in_train: false
+    apply_logit_adj_in_train: true  
     apply_logit_adj_in_eval: false
     logit_adj_tau: 1.0
     pair_penalty:
