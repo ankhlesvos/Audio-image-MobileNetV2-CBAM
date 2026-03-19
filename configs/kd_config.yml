@@ -12,21 +12,22 @@ teacher_conf:
 
 train_conf:
   use_gpu: True
-  batch_size: 32
+  batch_size: 8            # larger batch for stable gradients
   num_workers: 4
   max_epoch: 50
-  learning_rate: 3.0e-4
+  learning_rate: 5.0e-5     # fine-tuning LR (warm-start from existing student)
   weight_decay: 1.0e-4
   seed: 42
-  save_model_dir: 'saved_models/kd_pretrain/'
-  patience: 10
+  save_model_dir: 'saved_models/kd_warmstart/'
+  patience: 15
   monitor_metric: 'f1'
   use_sampler: false
   use_class_weights: false
+  save_every_n_epochs: 5
 
   # --- Knowledge Distillation ---
   kd_mode: true
-  kd_teacher_checkpoint: 'saved_models/teacher_ast/best_model_epoch_50.pth'  # adjust to actual best
+  kd_teacher_checkpoint: 'saved_models/teacher_ast/best_model_epoch_18.pth'  # adjust to actual best
   kd_alpha: 0.5         # weight for soft loss (1-alpha = weight for hard loss)
   kd_temperature: 4.0   # softmax temperature
   kd_feature_distill: false  # set true to enable intermediate feature distillation
@@ -52,7 +53,10 @@ model_conf:
   num_classes: 3
   in_channels: 3
   width_mult: 1.0
-  use_imagenet_pretrain: true
+  # Warm-start from existing best student (already trained on ship acoustics)
+  # This is preferred over ImageNet pretrain for domain-specific fine-tuning
+  pretrain_student_checkpoint: 'saved_models/M5_Plus_LogitAdj/best_model.pth'
+  use_imagenet_pretrain: false   # disabled — using domain-specific warm-start instead
   pretrain_mode: 'backbone_only'
   model_config:
     - [1, 16, 1, 1, 0]

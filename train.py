@@ -191,6 +191,23 @@ def train(config_path: str):
     # 简单的模型结构打印
     # print(model)
 
+    # --- Warm-start from existing student checkpoint ---
+    student_ckpt = model_conf.get('pretrain_student_checkpoint', '')
+    if student_ckpt and os.path.exists(student_ckpt):
+        print(f"[INFO] Warm-starting student from: {student_ckpt}")
+        sd = torch.load(student_ckpt, map_location=device)
+        # Strip thop metadata keys
+        sd = {k: v for k, v in sd.items()
+              if 'total_ops' not in k and 'total_params' not in k}
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        if missing:
+            print(f"         Missing keys ({len(missing)}): {missing[:3]}{'...' if len(missing) > 3 else ''}")
+        if unexpected:
+            print(f"         Unexpected keys ({len(unexpected)}): {unexpected[:3]}{'...' if len(unexpected) > 3 else ''}")
+        print(f"[INFO] Warm-start complete.")
+    elif student_ckpt:
+        print(f"[WARN] pretrain_student_checkpoint not found: {student_ckpt} — training from scratch.")
+
 
     # Calculate GFLOPs/Params
     try:
@@ -351,6 +368,11 @@ def train(config_path: str):
     epochs_no_improve = 0
     top_k_models = []  # List of tuples: (metric_value, model_path)
     top_k = 3
+    save_every_n = train_conf.get('save_every_n_epochs', 0)  # 0 = disabled
+    if save_every_n > 0:
+        periodic_dir = save_dir / 'periodic'
+        periodic_dir.mkdir(parents=True, exist_ok=True)
+        print(f"  Periodic checkpointing: every {save_every_n} epochs → {periodic_dir}")
 
     # ===== [TEMP] Sampler Verification — DELETE AFTER USE =====
     def verify_sampler_distribution(loader, num_cls, true_counts):
@@ -648,6 +670,12 @@ def train(config_path: str):
         if epochs_no_improve >= patience:
             print(f"\nEarly stopping triggered after {epoch + 1} epochs!")
             break
+
+        # --- Periodic checkpoint save (regardless of val metric) ---
+        if save_every_n > 0 and (epoch + 1) % save_every_n == 0:
+            periodic_path = periodic_dir / f"epoch_{epoch+1}.pth"
+            torch.save(model.state_dict(), periodic_path)
+            print(f"  [Periodic] Saved checkpoint: {periodic_path}")
 
         # 更新学习率
         # Update learning rate
