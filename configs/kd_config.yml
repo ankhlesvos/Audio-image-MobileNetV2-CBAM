@@ -12,7 +12,7 @@ teacher_conf:
 
 train_conf:
   use_gpu: True
-  batch_size: 8            # larger batch for stable gradients
+  batch_size: 64            # larger batch for stable gradients
   num_workers: 4
   max_epoch: 50
   learning_rate: 5.0e-5     # fine-tuning LR (warm-start from existing student)

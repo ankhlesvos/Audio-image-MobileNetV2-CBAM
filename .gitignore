@@ -13,7 +13,7 @@ __pycache__/
 .vscode/
 /venv/
 /DeepShip-main/
-/saved_models/
+/saved_models/teacher_ast
 
 # Datasets (非常重要！不要上传数据集本身)
 data/ShipsEar/
