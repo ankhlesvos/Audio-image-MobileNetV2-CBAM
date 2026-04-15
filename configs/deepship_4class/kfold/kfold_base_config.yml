@@ -1,0 +1,60 @@
+# ============================================================================
+# 4-Class DeepShip K-Fold Base Configuration
+# ============================================================================
+# This file is a TEMPLATE. The run_kfold_4class.py script fills in
+# fold-specific train_list/val_list/save_model_dir paths.
+#
+# Labels: 0=Cargo, 1=Passengership, 2=Tanker, 3=Tug
+# ============================================================================
+
+data_conf:
+  train_list: 'data/kfold_4class/fold0_train.txt'
+  val_list:   'data/kfold_4class/fold0_val.txt'
+  test_list:  'data/deepship_4class/test_list.txt'
+
+train_conf:
+  batch_size: 16
+  learning_rate: 3e-4
+  max_epoch: 50
+  use_gpu: true
+  num_workers: 4
+  save_model_dir: 'saved_models/deepship_4class/kfold/'
+  weight_decay: 1.0e-4
+  seed: 42
+  monitor_metric: 'f1'
+  patience: 10
+  save_every_n_epochs: 0
+  file_voting_strategy: 'majority'
+  file_voting_top_k: 3
+  use_sampler: false
+  sampler_alpha: 0.5
+  use_class_weights: false
+  freeze_backbone: false
+  loss_conf:
+    loss_type: 'ce'
+    gamma: 0.0
+    label_smoothing: 0.1
+    apply_logit_adj_in_train: true
+    apply_logit_adj_in_eval: false
+    logit_adj_tau: 1.0
+    pair_penalty:
+      use_penalty: false
+      targets: []
+      weight: 2.0
+
+model_conf:
+  num_classes: 4
+  width_mult: 1.0
+  in_channels: 3
+  model_config:
+    - [1, 16, 1, 1, 0]
+    - [6, 24, 2, 2, 2]   # CBAM at stage 2
+    - [6, 32, 3, 1, 0]
+    - [6, 64, 4, 2, 2]   # CBAM at stage 4
+    - [6, 96, 3, 1, 0]
+    - [6, 160, 3, 1, 0]
+    - [6, 320, 1, 1, 0]
+  asymmetric: true
+  multiscale: true
+  force_no_residual: false
+  audio_mode: false

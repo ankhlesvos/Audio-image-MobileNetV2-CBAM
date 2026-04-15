@@ -53,7 +53,7 @@ def train_teacher(config_path: str, max_epoch_override: int = None):
     teacher_conf = config.get('teacher_conf', {})
     model_conf = config.get('model_conf', {})
 
-    num_classes = teacher_conf.get('num_classes', model_conf.get('num_classes', 3))
+    num_classes = teacher_conf.get('num_classes', model_conf.get('num_classes', 4))
 
     if max_epoch_override is not None:
         train_conf['max_epoch'] = max_epoch_override

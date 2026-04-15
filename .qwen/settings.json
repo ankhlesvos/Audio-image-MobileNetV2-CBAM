@@ -4,7 +4,17 @@
       "Bash(ls *)",
       "Bash(python *)",
       "Bash(python3 *)",
-      "Bash(/home/ankh/pycharmprojects/audio-image-mobilenetv2-cbam/venv/bin/python *)"
+      "Bash(/home/ankh/pycharmprojects/audio-image-mobilenetv2-cbam/venv/bin/python *)",
+      "Bash(mkdir *)",
+      "Bash(mv *)",
+      "Bash(do *)",
+      "Bash(done)",
+      "Bash(then *)",
+      "Bash(elif *)",
+      "Bash(rmdir *)",
+      "Bash(fi)",
+      "Bash(cp *)",
+      "Bash(head *)"
     ]
   },
   "$version": 3

@@ -1,0 +1,61 @@
+# ============================================================================
+# M5_Baseline — 4-Class DeepShip Configuration
+# ============================================================================
+# MobileNetV2 + CBAM(S2,S4) + Asymmetric + Multiscale
+# Clean CE baseline (no focal, no sampler, no LA)
+# Labels: 0=Cargo, 1=Passengership, 2=Tanker, 3=Tug
+# ============================================================================
+
+data_conf:
+  train_list: 'data/deepship_4class/train_list.txt'
+  val_list:   'data/deepship_4class/val_list.txt'
+  test_list:  'data/deepship_4class/test_list.txt'
+
+train_conf:
+  batch_size: 16
+  learning_rate: 0.001
+  max_epoch: 50
+  use_gpu: true
+  num_workers: 4
+  save_model_dir: 'saved_models/deepship_4class/M5_Baseline/'
+  weight_decay: 1.0e-4
+  seed: 42
+  monitor_metric: 'f1'
+  patience: 10
+  save_every_n_epochs: 0
+  file_voting_strategy: 'majority'
+  file_voting_top_k: 3
+  use_sampler: false
+  sampler_alpha: 0.5
+  use_class_weights: false
+  freeze_backbone: false
+  loss_conf:
+    loss_type: 'ce'
+    gamma: 0.0
+    label_smoothing: 0.1
+    apply_logit_adj_in_train: false
+    apply_logit_adj_in_eval: false
+    logit_adj_tau: 1.0
+    pair_penalty:
+      use_penalty: false
+      targets:
+        - [1, 2]
+        - [2, 0]
+      weight: 2.0
+
+model_conf:
+  num_classes: 4
+  width_mult: 1.0
+  in_channels: 3
+  model_config:
+    - [1, 16, 1, 1, 0]
+    - [6, 24, 2, 2, 2]   # CBAM at stage 2
+    - [6, 32, 3, 1, 0]
+    - [6, 64, 4, 2, 2]   # CBAM at stage 4
+    - [6, 96, 3, 1, 0]
+    - [6, 160, 3, 1, 0]
+    - [6, 320, 1, 1, 0]
+  asymmetric: true
+  multiscale: true
+  force_no_residual: false
+  audio_mode: false

@@ -31,7 +31,7 @@ class ASTTeacherModel(nn.Module):
       - Feature access for intermediate-layer distillation.
 
     Args:
-        num_classes: Number of output classes (default: 3).
+        num_classes: Number of output classes (default: 4 for DeepShip: Cargo, Passengership, Tanker, Tug).
         pretrained_name: HuggingFace model name or path for pretrained AST weights.
         freeze_encoder: If True, freeze the AST encoder (only train classifier head).
         num_mel_bins: Number of mel frequency bins in the input (default: 160).
@@ -40,7 +40,7 @@ class ASTTeacherModel(nn.Module):
 
     def __init__(
         self,
-        num_classes: int = 3,
+        num_classes: int = 4,
         pretrained_name: str = "MIT/ast-finetuned-audioset-10-10-0.4593",
         freeze_encoder: bool = False,
         num_mel_bins: int = 160,

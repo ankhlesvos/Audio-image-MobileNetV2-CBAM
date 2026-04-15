@@ -1,6 +1,13 @@
+# ============================================================================
+# Test Configuration — 4-Class DeepShip
+# ============================================================================
+# Labels: 0=Cargo, 1=Passengership, 2=Tanker, 3=Tug
+# ============================================================================
+
 data_conf:
-  train_list: 'data/train_list.txt'
-  test_list: 'data/test_list.txt'
+  train_list: 'data/deepship_4class/train_list.txt'
+  val_list:   'data/deepship_4class/val_list.txt'
+  test_list:  'data/deepship_4class/test_list.txt'
 
 
 

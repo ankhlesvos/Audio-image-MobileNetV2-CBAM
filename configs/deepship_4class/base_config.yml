@@ -1,0 +1,60 @@
+# ============================================================================
+# DeepShip 4-Class Base Configuration
+# ============================================================================
+# Labels:
+#   0 = Cargo
+#   1 = Passengership
+#   2 = Tanker
+#   3 = Tug
+#
+# This is the PRIMARY CONFIG for the 4-class DeepShip mainline.
+# DO NOT mix with legacy_merged (3-class) experiments.
+# ============================================================================
+
+data_conf:
+  train_list: 'data/deepship_4class/train_list.txt'
+  val_list:   'data/deepship_4class/val_list.txt'   # Optional: create via create_val_split.py
+  test_list:  'data/deepship_4class/test_list.txt'
+
+train_conf:
+  batch_size: 32
+  learning_rate: 0.001
+  max_epoch: 50
+  use_gpu: true
+  num_workers: 4
+  save_model_dir: 'saved_models/deepship_4class/'
+  weight_decay: 1.0e-4
+  seed: 42
+  monitor_metric: 'f1'          # 'acc' or 'f1'
+  patience: 10
+  # Optional periodic checkpointing
+  save_every_n_epochs: 0
+  # File-level voting
+  file_voting_strategy: 'majority'  # 'majority', 'top_k', 'entropy'
+  file_voting_top_k: 3
+  # Sampler (set use_sampler=false for standard training)
+  use_sampler: false
+  sampler_alpha: 0.5
+  use_class_weights: true
+  loss_conf:
+    loss_type: 'focal'          # 'ce' or 'focal'
+    gamma: 3.0
+    label_smoothing: 0.1
+    apply_logit_adj_in_train: false
+    apply_logit_adj_in_eval: false
+    logit_adj_tau: 1.0
+    pair_penalty:
+      use_penalty: true
+      targets: [[0, 3], [3, 0]] # Penalize Cargo↔Tug confusion (the hardest pair)
+      weight: 2.0
+
+model_conf:
+  num_classes: 4
+  width_mult: 1.0
+  in_channels: 3
+  asymmetric: false
+  multiscale: false
+  force_no_residual: false
+  audio_mode: false
+  use_imagenet_pretrain: false
+  pretrain_mode: 'backbone_only'
