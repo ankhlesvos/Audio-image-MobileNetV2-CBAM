@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls *)",
+      "Bash(python *)",
+      "Bash(python3 *)",
+      "Bash(/home/ankh/pycharmprojects/audio-image-mobilenetv2-cbam/venv/bin/python *)"
+    ]
+  },
+  "$version": 3
+}
