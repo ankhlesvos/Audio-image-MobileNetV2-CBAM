@@ -34,8 +34,11 @@ BASE_CONFIG_TEMPLATE = {
         'use_sampler': False,
         'sampler_alpha': 0.5,
         'use_class_weights': True,
-        'monitor_metric': 'f1',
-        'patience': 10,
+        'monitor_metric': 'val_loss',
+        'patience': 15,
+        'min_epochs': 15,
+        'min_delta': 0.002,
+        'best_model_metric': 'val_file_f1',
         'file_voting_strategy': 'majority',
         'file_voting_top_k': 3,
         'loss_conf': {

@@ -198,9 +198,13 @@ def train_teacher(config_path: str, max_epoch_override: int = None):
     best_f1_epoch = 0
     best_accuracy = 0.0
     best_acc_epoch = 0
-    monitor_metric = train_conf.get('monitor_metric', 'f1')
-    patience = train_conf.get('patience', 10)
+    monitor_metric = train_conf.get('monitor_metric', 'val_loss')
+    best_model_metric = train_conf.get('best_model_metric', 'val_file_f1')
+    patience = train_conf.get('patience', 15)
+    min_epochs = train_conf.get('min_epochs', 15)
+    min_delta = train_conf.get('min_delta', 0.002)
     epochs_no_improve = 0
+    best_monitor_value = None
     top_k_models = []
     top_k = 3
 
@@ -327,6 +331,23 @@ def train_teacher(config_path: str, max_epoch_override: int = None):
         avg_train_loss = total_loss / len(train_loader)
         train_accuracy = total_correct / len(train_dataset)
 
+        # --- Val Loss computation (for early stopping when monitor=val_loss) ---
+        val_loss_total = 0.0
+        val_loss_count = 0
+        model.eval()
+        with torch.no_grad():
+            for _vinp, _vla, _vlb, _vlam in val_loader:
+                _vinp = _vinp.to(device)
+                _vla = _vla.to(device)
+                _vout = model(_vinp)
+                if loss_conf.get('apply_logit_adj_in_train', False):
+                    tau = loss_conf.get('logit_adj_tau', 1.0)
+                    _vout = _vout + tau * log_prior
+                _vloss = criterion(_vout, _vla)  # reduction='none'
+                val_loss_total += _vloss.sum().item()
+                val_loss_count += _vla.size(0)
+        avg_val_loss = val_loss_total / max(val_loss_count, 1)
+
         # --- Val evaluation ---
         model.eval()
         val_tag = f"Epoch {epoch+1}/{train_conf['max_epoch']} [Val]"
@@ -338,25 +359,29 @@ def train_teacher(config_path: str, max_epoch_override: int = None):
 
         print(f"Epoch {epoch+1}/{train_conf['max_epoch']}:\n"
               f"  Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f}\n"
+              f"  Val Loss:   {avg_val_loss:.4f}  <-- early stopping\n"
               f"  [Val-Seg]   Acc: {seg_accuracy:.4f} | F1: {seg_f1:.4f}\n"
               f"  [Val-File]  Acc: {file_accuracy:.4f} | P: {file_precision:.4f} "
-              f"| R: {file_recall:.4f} | F1: {f1:.4f}  <-- model selection")
+              f"| R: {file_recall:.4f} | F1: {f1:.4f}  <-- best checkpoint")
 
         if (epoch + 1) % 5 == 0 or epoch == train_conf['max_epoch'] - 1:
             print("\nClassification Report (Val File-Level):\n")
             print(classification_report(val_gt, val_pred_vote, zero_division=0))
 
-        # --- Model saving & early stopping ---
-        current_metric = eval_accuracy if monitor_metric == 'acc' else f1
-        new_best = False
+        # --- Best model saving (based on best_model_metric) ---
+        if best_model_metric == 'val_file_acc':
+            ckpt_metric_value = file_accuracy
+        else:  # default: 'val_file_f1'
+            ckpt_metric_value = f1
 
-        if len(top_k_models) < top_k or current_metric > top_k_models[0][0]:
+        new_best_ckpt = False
+        if len(top_k_models) < top_k or ckpt_metric_value > top_k_models[0][0]:
             best_path = save_dir / f"best_model_epoch_{epoch+1}.pth"
             torch.save(model.state_dict(), best_path)
             print(f"  Saved top-{top_k} model: {best_path} "
-                  f"(Val-{monitor_metric.upper()}: {current_metric:.4f})")
-            new_best = True
-            top_k_models.append((current_metric, best_path))
+                  f"(best_model_metric={best_model_metric}: {ckpt_metric_value:.4f})")
+            new_best_ckpt = True
+            top_k_models.append((ckpt_metric_value, best_path))
             top_k_models.sort(key=lambda x: x[0])
             if len(top_k_models) > top_k:
                 _, removed = top_k_models.pop(0)
@@ -370,16 +395,39 @@ def train_teacher(config_path: str, max_epoch_override: int = None):
             best_f1 = f1
             best_f1_epoch = epoch + 1
 
-        if new_best:
+        # --- Early Stopping (based on monitor_metric) ---
+        if monitor_metric == 'val_loss':
+            es_improved = False
+            if best_monitor_value is None:
+                best_monitor_value = avg_val_loss
+                es_improved = True
+            elif avg_val_loss < best_monitor_value - min_delta:
+                best_monitor_value = avg_val_loss
+                es_improved = True
+        else:
+            es_value = eval_accuracy if monitor_metric == 'acc' else f1
+            es_improved = False
+            if best_monitor_value is None:
+                best_monitor_value = es_value
+                es_improved = True
+            elif es_value > best_monitor_value + min_delta:
+                best_monitor_value = es_value
+                es_improved = True
+
+        if es_improved:
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
 
         if epochs_no_improve > 0:
-            print(f"  No improvement for {epochs_no_improve} epochs.")
-        if epochs_no_improve >= patience:
-            print(f"\nEarly stopping after {epoch+1} epochs!")
+            print(f"  [EarlyStop] No {monitor_metric} improvement for {epochs_no_improve}/{patience} epochs "
+                  f"(best={best_monitor_value:.4f}, delta={min_delta})")
+        if epochs_no_improve >= patience and (epoch + 1) >= min_epochs:
+            print(f"\nEarly stopping after {epoch+1} epochs! "
+                  f"(monitor={monitor_metric}, best={best_monitor_value:.4f})")
             break
+        elif epochs_no_improve >= patience and (epoch + 1) < min_epochs:
+            print(f"  [EarlyStop] Would stop, but min_epochs={min_epochs} not reached yet.")
 
         scheduler.step()
 

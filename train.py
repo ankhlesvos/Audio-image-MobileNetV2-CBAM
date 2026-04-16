@@ -359,13 +359,24 @@ def train(config_path: str):
     best_acc_epoch = 0
     best_f1 = 0.0
     best_f1_epoch = 0
-    monitor_metric = train_conf.get('monitor_metric', 'f1')
+    # --- Early stopping / best model config ---
+    # monitor_metric controls early stopping signal:
+    #   'val_loss'  → stop when val loss stops decreasing (most stable)
+    #   'f1' / 'acc' → legacy: stop when file-level metric stops improving
+    # best_model_metric controls which metric picks the saved checkpoint:
+    #   'val_file_f1' (default) → save checkpoint with highest val file F1
+    #   'val_file_acc' → save checkpoint with highest val file accuracy
+    monitor_metric = train_conf.get('monitor_metric', 'val_loss')
+    best_model_metric = train_conf.get('best_model_metric', 'val_file_f1')
     save_dir = Path(train_conf['save_model_dir'])
     save_dir.mkdir(parents=True, exist_ok=True)  # 确保保存目录存在
     
     # Early stopping config
-    patience = train_conf.get('patience', 10)
+    patience = train_conf.get('patience', 15)
+    min_epochs = train_conf.get('min_epochs', 15)
+    min_delta = train_conf.get('min_delta', 0.002)
     epochs_no_improve = 0
+    best_monitor_value = None  # tracks the best val_loss (or legacy metric)
     top_k_models = []  # List of tuples: (metric_value, model_path)
     top_k = 3
     save_every_n = train_conf.get('save_every_n_epochs', 0)  # 0 = disabled
@@ -500,7 +511,26 @@ def train(config_path: str):
         avg_train_loss = total_loss / len(train_loader)
         train_accuracy = total_correct / len(train_dataset)
 
-        # ─── Val Evaluation (used for early stopping / best model selection) ───
+        # ─── Val Loss computation (for early stopping when monitor=val_loss) ───
+        val_loss_total = 0.0
+        val_loss_count = 0
+        model.eval()
+        with torch.no_grad():
+            for _vinp, _vla, _vlb, _vlam in val_loader:
+                _vinp = _vinp.to(device)
+                if model_conf.get('in_channels', 3) == 1 and _vinp.size(1) == 3:
+                    _vinp = _vinp[:, 0:1, :, :]
+                _vla = _vla.to(device)
+                _vout = model(_vinp)
+                if loss_conf.get('apply_logit_adj_in_train', False):
+                    tau = loss_conf.get('logit_adj_tau', 1.0)
+                    _vout = _vout + tau * log_prior
+                _vloss = criterion_none(_vout, _vla)
+                val_loss_total += _vloss.sum().item()
+                val_loss_count += _vla.size(0)
+        avg_val_loss = val_loss_total / max(val_loss_count, 1)
+
+        # ─── Val Evaluation (used for best model selection) ───
         def run_file_level_eval(loader, dataset_ref, desc_tag):
             """File-level evaluation on the given loader using specified voting strategy.
             Returns: (file_accuracy, file_precision, file_recall, file_f1,
@@ -624,26 +654,31 @@ def train(config_path: str):
 
         print(f"Epoch {epoch + 1}/{train_conf['max_epoch']}:\n"
               f"  Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f}\n"
+              f"  Val Loss:   {avg_val_loss:.4f}  <-- early stopping\n"
               f"  [Val-Seg]   Acc: {seg_accuracy:.4f} | F1: {seg_f1:.4f}\n"
-              f"  [Val-File]  Acc: {file_accuracy:.4f} | P: {file_precision:.4f} | R: {file_recall:.4f} | F1: {f1:.4f}  <-- model selection")
+              f"  [Val-File]  Acc: {file_accuracy:.4f} | P: {file_precision:.4f} | R: {file_recall:.4f} | F1: {f1:.4f}  <-- best checkpoint")
 
         if (epoch + 1) % 5 == 0 or epoch == train_conf['max_epoch'] - 1:
             print("\nClassification Report (Val File-Level):\n")
             print(classification_report(val_gt, val_pred_vote, zero_division=0))
 
-        # --- 保存最佳模型与记录 ---
-        new_best_this_epoch = False
-        current_metric = eval_accuracy if monitor_metric == 'acc' else f1
-        
-        # Check if current_metric is in top-K
-        if len(top_k_models) < top_k or current_metric > top_k_models[0][0]:
+        # --- 保存最佳模型 (based on best_model_metric) ---
+        # best_model_metric selects which val metric determines the saved checkpoint
+        if best_model_metric == 'val_file_acc':
+            ckpt_metric_value = file_accuracy
+        else:  # default: 'val_file_f1'
+            ckpt_metric_value = f1
+
+        new_best_ckpt = False
+        if len(top_k_models) < top_k or ckpt_metric_value > top_k_models[0][0]:
             best_model_path = save_dir / f"best_model_epoch_{epoch+1}.pth"
             torch.save(model.state_dict(), best_model_path)
-            print(f"  New top-{top_k} model saved to {best_model_path} with Val-{monitor_metric.upper()}: {current_metric:.4f}")
-            new_best_this_epoch = True
+            print(f"  New top-{top_k} checkpoint saved to {best_model_path} "
+                  f"(best_model_metric={best_model_metric}: {ckpt_metric_value:.4f})")
+            new_best_ckpt = True
             
-            top_k_models.append((current_metric, best_model_path))
-            top_k_models.sort(key=lambda x: x[0])  # Sort ascending, worst is at index 0, best is at index -1
+            top_k_models.append((ckpt_metric_value, best_model_path))
+            top_k_models.sort(key=lambda x: x[0])  # ascending; worst=index 0, best=index -1
             
             if len(top_k_models) > top_k:
                 removed_metric, removed_path = top_k_models.pop(0)
@@ -659,17 +694,42 @@ def train(config_path: str):
             best_f1 = f1
             best_f1_epoch = epoch + 1
 
-        # Early Stopping: reset on improvement, increment otherwise
-        if new_best_this_epoch:
+        # --- Early Stopping (based on monitor_metric) ---
+        # Determine the early-stopping signal
+        if monitor_metric == 'val_loss':
+            # For loss: improvement means DECREASE, so we negate for comparison
+            es_improved = False
+            if best_monitor_value is None:
+                best_monitor_value = avg_val_loss
+                es_improved = True
+            elif avg_val_loss < best_monitor_value - min_delta:
+                best_monitor_value = avg_val_loss
+                es_improved = True
+        else:
+            # Legacy: monitor file-level metric (higher is better)
+            es_value = eval_accuracy if monitor_metric == 'acc' else f1
+            es_improved = False
+            if best_monitor_value is None:
+                best_monitor_value = es_value
+                es_improved = True
+            elif es_value > best_monitor_value + min_delta:
+                best_monitor_value = es_value
+                es_improved = True
+
+        if es_improved:
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
 
         if epochs_no_improve > 0:
-            print(f"  No improvement for {epochs_no_improve} epochs.")
-        if epochs_no_improve >= patience:
-            print(f"\nEarly stopping triggered after {epoch + 1} epochs!")
+            print(f"  [EarlyStop] No {monitor_metric} improvement for {epochs_no_improve}/{patience} epochs "
+                  f"(best={best_monitor_value:.4f}, delta={min_delta})")
+        if epochs_no_improve >= patience and (epoch + 1) >= min_epochs:
+            print(f"\nEarly stopping triggered after {epoch + 1} epochs! "
+                  f"(monitor={monitor_metric}, best={best_monitor_value:.4f})")
             break
+        elif epochs_no_improve >= patience and (epoch + 1) < min_epochs:
+            print(f"  [EarlyStop] Would stop, but min_epochs={min_epochs} not reached yet.")
 
         # --- Periodic checkpoint save (regardless of val metric) ---
         if save_every_n > 0 and (epoch + 1) % save_every_n == 0:
