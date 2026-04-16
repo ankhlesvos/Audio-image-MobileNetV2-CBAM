@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.pth
+*.png
+*.txt
 
 # Conda environments
 /envs/
@@ -19,6 +22,7 @@ __pycache__/
 data/ShipsEar/
 data/cifar10/
 cifar-10-batches-py/
+data/
 
 # Saved models (可以上传一个最好的，但不要上传所有)
 # saved_models/*

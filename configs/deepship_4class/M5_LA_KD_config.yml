@@ -1,0 +1,72 @@
+# ============================================================================
+# M5_LA_KD — 4-Class DeepShip Configuration
+# ============================================================================
+# MobileNetV2 + CBAM(S2,S4) + Asymmetric + Multiscale + ImageNet Init
+# LogitAdj (Train) + Knowledge Distillation (AST Teacher)
+# ============================================================================
+
+data_conf:
+  train_list: 'data/deepship_4class/train_list.txt'
+  val_list:   'data/deepship_4class/val_list.txt'
+  test_list:  'data/deepship_4class/test_list.txt'
+
+train_conf:
+  batch_size: 16
+  learning_rate: 0.001
+  max_epoch: 50
+  use_gpu: true
+  num_workers: 4
+  save_model_dir: 'saved_models/deepship_4class/M5_LA_KD/'
+  weight_decay: 1.0e-4
+  seed: 42
+  
+  # Updated monitoring logic
+  monitor_metric: 'val_loss'
+  best_model_metric: 'val_file_f1'
+  patience: 15
+  min_epochs: 15
+  min_delta: 0.002
+  
+  save_every_n_epochs: 0
+  file_voting_strategy: 'majority'
+  file_voting_top_k: 3
+  
+  # Logit Adjustment
+  use_sampler: false
+  use_class_weights: false
+  freeze_backbone: false
+  loss_conf:
+    loss_type: 'ce'
+    gamma: 0.0
+    label_smoothing: 0.1
+    apply_logit_adj_in_train: true
+    apply_logit_adj_in_eval: false
+    logit_adj_tau: 1.0
+    
+  # --- Knowledge Distillation ---
+  kd_mode: true
+  kd_teacher_checkpoint: 'saved_models/deepship_4class/AST_Teacher/best_model_epoch_XXX.pth' # NOTE: please update this path after teacher training!
+  kd_alpha: 0.5
+  kd_temperature: 4.0
+  kd_feature_distill: false
+
+model_conf:
+  num_classes: 4
+  width_mult: 1.0
+  in_channels: 3
+  model_config:
+    - [1, 16, 1, 1, 0]
+    - [6, 24, 2, 2, 2]   # CBAM at stage 2
+    - [6, 32, 3, 1, 0]
+    - [6, 64, 4, 2, 2]   # CBAM at stage 4
+    - [6, 96, 3, 1, 0]
+    - [6, 160, 3, 1, 0]
+    - [6, 320, 1, 1, 0]
+  asymmetric: true
+  multiscale: true
+  force_no_residual: false
+  audio_mode: false
+  
+  # ImageNet Pretraining for initialization
+  use_imagenet_pretrain: true
+  pretrain_mode: 'backbone_only'

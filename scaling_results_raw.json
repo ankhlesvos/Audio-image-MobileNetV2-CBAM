@@ -1,0 +1,44 @@
+{
+  "MyNet-S": {
+    "val_acc": 0.4444,
+    "val_f1": 0.4444,
+    "test_acc": 0.7692,
+    "test_f1": 0.7435,
+    "params": 708291.0,
+    "flops": 302051792.0,
+    "width_mult": 0.5,
+    "params_m": 0.7083,
+    "flops_m": 302.05,
+    "size_kb": 3136.6,
+    "cpu_mean_ms": 125.58961599061149,
+    "cpu_std_ms": 14.505655271129005
+  },
+  "MyNet-M": {
+    "val_acc": 0.6667,
+    "val_f1": 0.6794,
+    "test_acc": 0.6154,
+    "test_f1": 0.5649,
+    "params": 1392319.0,
+    "flops": 585978044.0,
+    "width_mult": 0.75,
+    "params_m": 1.3923,
+    "flops_m": 585.98,
+    "size_kb": 5837.6,
+    "cpu_mean_ms": 149.75893617913243,
+    "cpu_std_ms": 46.57613655998484
+  },
+  "MyNet-L": {
+    "val_acc": 0.5556,
+    "val_f1": 0.4444,
+    "test_acc": 0.6154,
+    "test_f1": 0.5996,
+    "params": 2299095.0,
+    "flops": 959748360.0,
+    "width_mult": 1.0,
+    "params_m": 2.2991,
+    "flops_m": 959.75,
+    "size_kb": 9414.0,
+    "cpu_mean_ms": 224.14108567056246,
+    "cpu_std_ms": 98.2235079305945
+  }
+}

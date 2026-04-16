@@ -1,0 +1,50 @@
+{
+  "MyNet-S": {
+    "seg_acc": 0.4164,
+    "seg_f1": 0.4413,
+    "file_acc": 0.6364,
+    "file_f1": 0.6188,
+    "file_prec": 0.6481,
+    "file_rec": 0.6429,
+    "n_files": 22,
+    "n_segs": 1095,
+    "per_class_files": {
+      "0": 5,
+      "1": 7,
+      "2": 10
+    },
+    "width_mult": 0.5
+  },
+  "MyNet-M": {
+    "seg_acc": 0.5306,
+    "seg_f1": 0.5158,
+    "file_acc": 0.6364,
+    "file_f1": 0.6164,
+    "file_prec": 0.6398,
+    "file_rec": 0.6429,
+    "n_files": 22,
+    "n_segs": 1095,
+    "per_class_files": {
+      "0": 5,
+      "1": 7,
+      "2": 10
+    },
+    "width_mult": 0.75
+  },
+  "MyNet-L": {
+    "seg_acc": 0.379,
+    "seg_f1": 0.4124,
+    "file_acc": 0.5455,
+    "file_f1": 0.532,
+    "file_prec": 0.5536,
+    "file_rec": 0.5429,
+    "n_files": 22,
+    "n_segs": 1095,
+    "per_class_files": {
+      "0": 5,
+      "1": 7,
+      "2": 10
+    },
+    "width_mult": 1.0
+  }
+}

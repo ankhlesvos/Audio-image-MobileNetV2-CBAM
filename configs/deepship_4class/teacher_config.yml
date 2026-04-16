@@ -1,0 +1,32 @@
+train_conf:
+  use_gpu: true
+  batch_size: 16  # AST is heavy, keep batch size small to avoid OOM
+  num_workers: 4
+  max_epoch: 20   # Fine-tuning a pre-trained AST is usually fast
+  learning_rate: 0.00001 # 1e-5, low LR for fine-tuning transformer
+  weight_decay: 0.01
+  seed: 42
+  save_model_dir: 'saved_models/deepship_4class/AST_Teacher'
+  monitor_metric: 'val_loss'
+  best_model_metric: 'val_file_f1'
+  patience: 10
+  min_epochs: 5
+  min_delta: 0.002
+  file_voting_strategy: 'majority'
+  file_voting_top_k: 3
+  loss_conf:
+    loss_type: 'ce'
+    gamma: 0.0
+    label_smoothing: 0.0
+
+data_conf:
+  train_list: 'data/deepship_4class/train_list.txt'
+  val_list:   'data/deepship_4class/val_list.txt'
+  test_list:  'data/deepship_4class/test_list.txt'
+
+model_conf:
+  num_classes: 4
+
+teacher_conf:
+  pretrained_name: 'MIT/ast-finetuned-audioset-10-10-0.4593'
+  freeze_encoder_epochs: 3 # Freeze AST backbone for first 3 epochs to train the new head solely
