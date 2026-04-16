@@ -211,11 +211,9 @@ def train(config_path: str):
 
     # Calculate GFLOPs/Params
     try:
-        # DeepShip input: (1, 80, 301) for 3 seconds approx? 
-        # MelSpec shape: n_mels=80. time steps depends on audio length and hop length.
-        # dataset.py uses 3s segments. sample_rate=xxx.
-        # Let's assume standard shape used in verifying: (1, 80, 301)
-        flops, params = model.profile_model(input_size=(1, 80, 301))
+        # Input shape: (in_channels, n_mels=80, time≈301 for 5 s @ 32kHz/hop≈530)
+        _in_ch = model_conf.get('in_channels', 3)
+        flops, params = model.profile_model(input_size=(_in_ch, 80, 301))
         print(f"FLOPs: {flops / 1e9:.4f} G")
         print(f"Params: {params / 1e6:.4f} M")
     except Exception as e:
